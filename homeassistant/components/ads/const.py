@@ -15,6 +15,7 @@ DOMAIN = "ads"
 DATA_ADS: HassKey[AdsHub] = HassKey(DOMAIN)
 
 CONF_ADS_VAR = "adsvar"
+CONF_ADS_TYPE = "ads_type"
 
 STATE_KEY_STATE = "state"
 

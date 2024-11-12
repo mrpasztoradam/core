@@ -18,6 +18,7 @@ from homeassistant.core import HomeAssistant, ServiceCall
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
+from .config_flow import ADSOptionsFlowHandler
 from .const import CONF_ADS_VAR, DATA_ADS, DOMAIN, AdsType
 from .hub import AdsHub
 
@@ -65,17 +66,49 @@ CONFIG_SCHEMA = vol.Schema(
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the ADS component with optional YAML configuration."""
-    # Check if configuration exists in YAML and set it up accordingly
+    # Check if YAML configuration exists for this domain
     if DOMAIN not in config:
-        return True  # Skip setup if no YAML configuration is present
+        return True
 
     conf = config[DOMAIN]
+    # Store the AdsHub instance in hass.data[DOMAIN]
     return await async_setup_ads_integration(hass, conf)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up ADS from a config entry created via the GUI."""
-    return await async_setup_ads_integration(hass, entry.data)
+    """Set up ADS hub from a config entry via the GUI."""
+
+    if CONF_DEVICE in entry.data:
+        # This is the hub configuration
+        return await async_setup_ads_integration(hass, entry.data)
+    if "entity_type" in entry.data:
+        # This is an individual entity (e.g., sensor, switch)
+        return await async_setup_ads_entity(hass, entry)
+    # If entry doesn't match hub or entity format, log an error
+    _LOGGER.error("Unknown entry format for ADS integration: %s", entry.data)
+    return False
+
+
+async def async_setup_ads_entity(hass, entry):
+    """Set up an individual ADS entity from a config entry."""
+    entity_type = entry.data.get("entity_type")
+    if not entity_type:
+        _LOGGER.error("Missing entity type in ADS entity setup")
+        return False
+
+    # Setup logic for the individual entity (e.g., sensor, switch)
+    # Based on the entity_type (sensor, switch), initiate the correct platform
+    if entity_type == "sensor":
+        _LOGGER.debug("Forwarding setup to the sensor platform")
+        await hass.components.sensor.async_setup_entry(hass, entry)
+    elif entity_type == "switch":
+        _LOGGER.debug("Forwarding setup to the switch platform")
+        await hass.components.switch.async_setup_entry(hass, entry)
+    else:
+        _LOGGER.error("Unsupported entity type for ADS integration: %s", entity_type)
+        return False
+
+    return True
 
 
 async def async_setup_ads_integration(
@@ -136,6 +169,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _LOGGER.debug("Found ADS data, proceeding to shutdown")
 
+    if len(ads_data._devices) > 0:  # Access _entities directly  # noqa: SLF001
+        _LOGGER.debug("Entities are still present, not unloading ADS hub yet")
+        return False  # Return False if entities are still present
+
     try:
         if hasattr(ads_data, "shutdown"):
             ads_data.shutdown()  # Shutdown the connection if it exists
@@ -155,3 +192,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Clean up the data by deleting it from hass.data
     del hass.data[DATA_ADS]
     return True  # Return True if the unload was successful
+
+
+async def async_get_options_flow(config_entry):
+    """Get the options flow for this handler."""
+    return ADSOptionsFlowHandler(config_entry)

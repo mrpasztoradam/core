@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import voluptuous as vol
 
 from homeassistant.components.sensor import (
@@ -23,6 +25,8 @@ from . import ADS_TYPEMAP, CONF_ADS_FACTOR, CONF_ADS_TYPE
 from .const import CONF_ADS_VAR, DATA_ADS, STATE_KEY_STATE, AdsType
 from .entity import AdsEntity
 from .hub import AdsHub
+
+_LOGGER = logging.getLogger(__name__)
 
 DEFAULT_NAME = "ADS sensor"
 
@@ -55,6 +59,42 @@ PLATFORM_SCHEMA = SENSOR_PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_UNIT_OF_MEASUREMENT): cv.string,
     }
 )
+
+
+async def async_setup_entry(hass, entry, async_add_entities):
+    """Set up ADS sensor from a config entry."""
+    _LOGGER.debug("Setting up ADS sensor with entry data: %s", entry.data)
+
+    try:
+        # Extract necessary data for the sensor entity from entry.data
+        ads_var: str = entry.data[CONF_ADS_VAR]
+        ads_type: AdsType = entry.data.get(CONF_ADS_TYPE, AdsType.INT)
+        name: str = entry.data.get(CONF_NAME, "ADS Sensor")
+        factor: int = entry.data.get(CONF_ADS_FACTOR)
+        device_class: SensorDeviceClass | None = entry.data.get(CONF_DEVICE_CLASS)
+        state_class: SensorStateClass | None = CONF_STATE_CLASS
+        unit_of_measurement: str | None = entry.data.get(CONF_UNIT_OF_MEASUREMENT)
+
+        # Retrieve the hub instance from hass.data
+        ads_hub = hass.data[DATA_ADS]
+
+        # Create and add the sensor entity
+        async_add_entities(
+            [
+                AdsSensor(
+                    ads_hub,
+                    ads_var,
+                    ads_type,
+                    name,
+                    factor,
+                    device_class,
+                    state_class,
+                    unit_of_measurement,
+                )
+            ]
+        )
+    except KeyError as e:
+        _LOGGER.error("Missing required configuration key in entry data: %s", e)
 
 
 def setup_platform(
@@ -118,8 +158,15 @@ class AdsSensor(AdsEntity, SensorEntity):
             STATE_KEY_STATE,
             self._factor,
         )
+        # Register the entity with the hub
+        self._ads_hub.register_device(self._ads_var)
 
     @property
     def native_value(self) -> StateType:
         """Return the state of the device."""
         return self._state_dict[STATE_KEY_STATE]
+
+    async def async_will_remove_from_hass(self):
+        """Remove the entity from Home Assistant."""
+        # Unregister the entity from the hub
+        self._ads_hub.unregister_device(self._ads_var)

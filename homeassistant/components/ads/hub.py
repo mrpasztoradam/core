@@ -50,9 +50,60 @@ class AdsHub:
         except pyads.ADSError as err:
             _LOGGER.error(err)
 
+    def del_device_notification(self, device):
+        """Delete a notification from the ADS devices based on device."""
+
+        _LOGGER.debug("Attempting to delete notification for device: %s", device)
+        with self._lock:
+            # Look for the notification item by device name
+            notification_item = None
+            for hnotify, item in self._notification_items.items():
+                _LOGGER.debug(
+                    "Checking notification: %d for device %s", hnotify, item.name
+                )
+                if item.name == device:
+                    notification_item = item
+                    break
+
+        if not notification_item:
+            _LOGGER.error("Notification handle not found for device: %s", device)
+
+            _LOGGER.debug("Current notifications: %s", self._notification_items)
+            return
+
+        try:
+            # Remove the notification from the ADS client
+            self._client.del_device_notification(
+                notification_item.hnotify, notification_item.huser
+            )
+        except pyads.ADSError as err:
+            _LOGGER.error("Error removing notification for %s: %s", device, err)
+        else:
+            _LOGGER.debug(
+                "Removed device notification for variable %s, handle %d",
+                device,
+                notification_item.hnotify,
+            )
+
+        # After deletion, remove the item from the notification list
+        with self._lock:
+            self._notification_items.pop(notification_item.hnotify, None)
+
     def register_device(self, device):
         """Register a new device."""
-        self._devices.append(device)
+        if device not in self._devices:
+            self._devices.append(device)
+
+    def unregister_device(self, device):
+        """Unregister a device."""
+        _LOGGER.debug("Unregistering device: %s", device)
+        if device in self._devices:
+            # Ensure that the notification is deleted when unregistering
+            self.del_device_notification(device)
+            self._devices.remove(device)
+            _LOGGER.debug("Successfully unregistered device %s", device)
+        else:
+            _LOGGER.warning("Device %s not found in registered devices list", device)
 
     def write_by_name(self, name, value, plc_datatype):
         """Write a value to the device."""
@@ -93,6 +144,8 @@ class AdsHub:
                 _LOGGER.debug(
                     "Added device notification %d for variable %s", hnotify, name
                 )
+                # Log the state of _notification_items after adding
+            _LOGGER.debug("Current notifications: %s", self._notification_items)
 
     def _device_notification_callback(self, notification, name):
         """Handle device notifications."""
@@ -149,3 +202,10 @@ class AdsHub:
             _LOGGER.warning("No callback available for this datatype")
 
         notification_item.callback(notification_item.name, value)
+
+    def get_notification_handle(self, device):
+        """Get the notification handle for a device, if available."""
+        for hnotify, notification_item in self._notification_items.items():
+            if notification_item.name == device:
+                return hnotify
+        return None
