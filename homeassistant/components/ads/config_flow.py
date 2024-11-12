@@ -7,14 +7,8 @@ import voluptuous as vol
 from homeassistant.components.sensor import (
     DEVICE_CLASSES_SCHEMA as SENSOR_DEVICE_CLASSES_SCHEMA,
 )
-from homeassistant.config_entries import (
-    ConfigEntry,
-    ConfigFlow,
-    ConfigFlowResult,
-    OptionsFlow,
-)
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_DEVICE_CLASS, CONF_UNIT_OF_MEASUREMENT
-from homeassistant.core import callback
 from homeassistant.helpers import config_validation as cv, entity_registry as er
 
 from .const import CONF_ADS_TYPE, CONF_ADS_VAR, DOMAIN, AdsType
@@ -82,12 +76,6 @@ class ADSConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=data_schema,
             errors=errors,
         )
-
-    @staticmethod
-    @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
-        """Return the options flow to add entities like sensors or switches."""
-        return ADSOptionsFlowHandler(config_entry)
 
     def _is_valid_ams_net_id(self, net_id):
         """Check if AMS net ID is in correct format (like '192.168.10.120.1.1'), with all parts between 0 and 255."""
@@ -222,104 +210,3 @@ class ADSConfigFlow(ConfigFlow, domain=DOMAIN):
             for entity in entity_registry.entities.values()
             if entity.platform == "ads"
         }
-
-
-class ADSOptionsFlowHandler(OptionsFlow):
-    """Handle the options flow for ADS integration."""
-
-    def __init__(self, config_entry) -> None:
-        """Initialize ADS options flow."""
-        self.config_entry = config_entry
-        self.entity_type = None
-
-    async def async_step_init(self, user_input=None) -> ConfigFlowResult:
-        """Manage the options for the ADS integration."""
-
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            # Store entity type and move to the entity configuration step
-            self.entity_type = user_input[CONF_ENTITY_TYPE]
-            if self.entity_type == "sensor":
-                return await self.async_step_sensor()
-            if self.entity_type == "switch":
-                return await self.async_step_switch()
-
-        # Schema for selecting entity type
-        data_schema = vol.Schema(
-            {
-                vol.Required(CONF_ENTITY_TYPE): vol.In(ENTITY_TYPES),
-            }
-        )
-
-        return self.async_show_form(
-            step_id="init",
-            data_schema=data_schema,
-            errors=errors,
-        )
-
-    async def async_step_sensor(self, user_input=None) -> ConfigFlowResult:
-        """Step to configure options for adding an ADS sensor."""
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            # Save the sensor configuration in the entry options
-            new_options = {
-                **self.config_entry.options,
-                "sensor": {
-                    CONF_ADS_VAR: user_input[CONF_ADS_VAR],
-                    CONF_ADS_FACTOR: user_input.get(CONF_ADS_FACTOR),
-                    CONF_ADS_TYPE: user_input.get(CONF_ADS_TYPE),
-                    CONF_NAME: user_input.get(CONF_NAME, "ADS sensor"),
-                    CONF_DEVICE_CLASS: user_input.get(CONF_DEVICE_CLASS),
-                    CONF_UNIT_OF_MEASUREMENT: user_input.get(CONF_UNIT_OF_MEASUREMENT),
-                },
-            }
-            return self.async_create_entry(title="Add Sensor", data=new_options)
-
-        # Define schema for sensor configuration
-        data_schema = vol.Schema(
-            {
-                vol.Required(CONF_ADS_VAR): str,
-                vol.Optional(CONF_ADS_FACTOR): vol.Coerce(int),
-                vol.Optional(CONF_ADS_TYPE, default=AdsType.INT): vol.In(AdsType),
-                vol.Optional(CONF_NAME, default="ADS sensor"): str,
-                vol.Optional(CONF_DEVICE_CLASS): SENSOR_DEVICE_CLASSES_SCHEMA,
-                vol.Optional(CONF_UNIT_OF_MEASUREMENT): cv.string,
-            }
-        )
-
-        return self.async_show_form(
-            step_id="sensor",
-            data_schema=data_schema,
-            errors=errors,
-        )
-
-    async def async_step_switch(self, user_input=None) -> ConfigFlowResult:
-        """Step to configure options for adding an ADS switch."""
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            # Save the switch configuration in the entry options
-            new_options = {
-                **self.config_entry.options,
-                "switch": {
-                    CONF_ADS_VAR: user_input[CONF_ADS_VAR],
-                    CONF_NAME: user_input.get(CONF_NAME, "ADS switch"),
-                },
-            }
-            return self.async_create_entry(title="Add Switch", data=new_options)
-
-        # Define schema for switch configuration
-        data_schema = vol.Schema(
-            {
-                vol.Required(CONF_ADS_VAR): str,
-                vol.Optional(CONF_NAME, default="ADS switch"): str,
-            }
-        )
-
-        return self.async_show_form(
-            step_id="switch",
-            data_schema=data_schema,
-            errors=errors,
-        )

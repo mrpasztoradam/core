@@ -18,7 +18,6 @@ from homeassistant.core import HomeAssistant, ServiceCall
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
-from .config_flow import ADSOptionsFlowHandler
 from .const import CONF_ADS_VAR, DATA_ADS, DOMAIN, AdsType
 from .hub import AdsHub
 
@@ -192,8 +191,3 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Clean up the data by deleting it from hass.data
     del hass.data[DATA_ADS]
     return True  # Return True if the unload was successful
-
-
-async def async_get_options_flow(config_entry):
-    """Get the options flow for this handler."""
-    return ADSOptionsFlowHandler(config_entry)
