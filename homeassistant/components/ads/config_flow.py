@@ -37,7 +37,6 @@ class ADSConfigFlow(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         """Initialize the config flow."""
         self.entity_type: str | None = None
-        self.entity_data: dict | None = None
 
     async def async_step_user(self, user_input=None) -> ConfigFlowResult:
         """Handle the initial step."""
