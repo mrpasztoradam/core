@@ -18,6 +18,50 @@
       "invalid_port": "Must be between 1-65535. Usually 801 for TwinCAT 2 / 851 for TwinCAT 3"
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Options",
+        "description": "Select which options to amend.",
+        "menu_options": {
+          "hub_settings": "ADS Hub settings",
+          "add_entity": "Add entity",
+          "modify_entity": "Modify entity",
+          "remove_entity": "Remove entity"
+        }
+      },
+      "hub_settings": {
+        "title": "Example2 Options",
+        "description": "Option Set 1",
+        "data": {
+          "scan_interval": "Scan Interval (seconds)",
+          "description": "My Description"
+        }
+      },
+      "add_entity": {
+        "title": "Add entity",
+        "description": "Add a new ADS entity",
+        "menu_options": {
+          "add_sensor": "Sensor",
+          "add_cover": "Cover"
+        }
+      },
+      "modify_entity": {
+        "title": "Example2 Options",
+        "description": "Option Set 2",
+        "data": {
+          "chose": "Pick a device"
+        }
+      },
+      "remove_entity": {
+        "title": "Example2 Options",
+        "description": "Option Set 2",
+        "data": {
+          "chose": "Pick a device"
+        }
+      }
+    }
+  },
   "services": {
     "write_data_by_name": {
       "name": "Write data by name",

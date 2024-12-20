@@ -13,6 +13,7 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_DEVICE_CLASS, CONF_NAME, CONF_UNIT_OF_MEASUREMENT
 from homeassistant.core import HomeAssistant
 import homeassistant.helpers.config_validation as cv
@@ -73,6 +74,7 @@ def setup_platform(
     device_class: SensorDeviceClass | None = config.get(CONF_DEVICE_CLASS)
     state_class: SensorStateClass | None = config.get(CONF_STATE_CLASS)
     unit_of_measurement: str | None = config.get(CONF_UNIT_OF_MEASUREMENT)
+    unique_id: str = f"{ads_hub.get_mac_address()}_{ads_var}"
 
     entity = AdsSensor(
         ads_hub,
@@ -83,9 +85,48 @@ def setup_platform(
         device_class,
         state_class,
         unit_of_measurement,
+        unique_id,
     )
 
     add_entities([entity])
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up ADS sensors from a config entry."""
+    ads_hub = hass.data[DATA_ADS]
+    sensors = entry.options.get("sensors", [])
+    entities = []
+
+    for sensor_config in sensors:
+        ads_var: str = sensor_config[CONF_ADS_VAR]
+        ads_type: AdsType = sensor_config[CONF_ADS_TYPE]
+        name: str = sensor_config[CONF_NAME]
+        factor: int | None = sensor_config.get(CONF_ADS_FACTOR)
+        device_class: SensorDeviceClass | None = sensor_config.get(CONF_DEVICE_CLASS)
+        state_class: SensorStateClass | None = sensor_config.get(CONF_STATE_CLASS)
+        unit_of_measurement: str | None = sensor_config.get(CONF_UNIT_OF_MEASUREMENT)
+        # Generate a unique ID for each sensor
+        unique_id: str = f"{ads_hub.get_mac_address()}_{ads_var}"
+
+        entities.append(
+            AdsSensor(
+                ads_hub,
+                ads_var,
+                ads_type,
+                name,
+                factor,
+                device_class,
+                state_class,
+                unit_of_measurement,
+                unique_id,
+            )
+        )
+
+    async_add_entities(entities)
 
 
 class AdsSensor(AdsEntity, SensorEntity):
@@ -101,6 +142,7 @@ class AdsSensor(AdsEntity, SensorEntity):
         device_class: SensorDeviceClass | None,
         state_class: SensorStateClass | None,
         unit_of_measurement: str | None,
+        unique_id: str,
     ) -> None:
         """Initialize AdsSensor entity."""
         super().__init__(ads_hub, name, ads_var)
@@ -109,6 +151,7 @@ class AdsSensor(AdsEntity, SensorEntity):
         self._attr_device_class = device_class
         self._attr_state_class = state_class
         self._attr_native_unit_of_measurement = unit_of_measurement
+        self._unique_id = unique_id
 
     async def async_added_to_hass(self) -> None:
         """Register device notification."""
@@ -123,3 +166,8 @@ class AdsSensor(AdsEntity, SensorEntity):
     def native_value(self) -> StateType:
         """Return the state of the device."""
         return self._state_dict[STATE_KEY_STATE]
+
+    @property
+    def unique_id(self):
+        """Return the unique id of the device."""
+        return self._unique_id
