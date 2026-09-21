@@ -8,12 +8,8 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pyads
+from pyads.constants import ADSIGRP_DEVICE_DATA, ADSIOFFS_DEVDATA_ADSSTATE
 import pytest
-
-from homeassistant.components.ads.hub import (
-    ADSIGRP_DEVICE_DATA,
-    ADSIOFFS_DEVDATA_ADSSTATE,
-)
 
 from . import build_notification
 from .const import AMS_NET_ID, PORT, STATE_HANDLES

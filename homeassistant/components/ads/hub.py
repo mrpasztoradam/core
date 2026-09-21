@@ -12,6 +12,7 @@ import threading
 from typing import Any
 
 import pyads
+from pyads.constants import ADSIGRP_DEVICE_DATA, ADSIOFFS_DEVDATA_ADSSTATE
 
 from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
@@ -40,12 +41,6 @@ RECONNECT_MAX_INTERVAL = 300.0
 # hundred of them would take the teardown into the minutes.
 ADS_TIMEOUT = 5000
 TEARDOWN_TIMEOUT = 100
-
-# The ADS server publishes its own state at this address, as a UINT16, and
-# pushes it on change like any other notification. pyads does not name either
-# constant.
-ADSIGRP_DEVICE_DATA = 0xF100
-ADSIOFFS_DEVDATA_ADSSTATE = 0x0000
 
 
 @dataclass
