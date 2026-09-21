@@ -98,7 +98,13 @@ SCHEMA_SERVICE_WRITE_DATA_BY_NAME = probatio.All(
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the ADS component."""
 
-    conf = config[DOMAIN]
+    if (conf := config.get(DOMAIN)) is None:
+        # Reachable without the section, because configuring any ads platform
+        # pulls the component in.
+        _LOGGER.error(
+            "The ADS platforms need an '%s' section in configuration.yaml", DOMAIN
+        )
+        return False
 
     net_id = conf[CONF_DEVICE]
     ip_address = conf.get(CONF_IP_ADDRESS)

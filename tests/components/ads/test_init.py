@@ -11,6 +11,7 @@ from homeassistant.components.ads import (
     SERVICE_WRITE_DATA_BY_NAME,
 )
 from homeassistant.components.ads.const import CONF_ADS_VAR, DATA_ADS, DOMAIN
+from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.exceptions import Unauthorized
@@ -30,6 +31,23 @@ async def test_setup(hass: HomeAssistant, mock_pyads_connection: MagicMock) -> N
     mock_pyads_connection.assert_called_once_with(AMS_NET_ID, PORT, IP_ADDRESS)
     mock_pyads_connection.return_value.open.assert_called_once()
     assert hass.data[DATA_ADS]
+
+
+async def test_setup_without_config(
+    hass: HomeAssistant,
+    mock_pyads_connection: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test a platform pulling the component in without a config section."""
+    # The sensor domain itself still sets up; only its ads platform cannot.
+    assert await async_setup_component(
+        hass, SENSOR_DOMAIN, {SENSOR_DOMAIN: {"platform": DOMAIN, "adsvar": "GVL.x"}}
+    )
+    await hass.async_block_till_done()
+
+    assert "need an 'ads' section in configuration.yaml" in caplog.text
+    assert DATA_ADS not in hass.data
+    mock_pyads_connection.return_value.open.assert_not_called()
 
 
 async def test_setup_connection_error(
