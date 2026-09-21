@@ -35,6 +35,12 @@ KEEPALIVE_INTERVAL = timedelta(seconds=30)
 RECONNECT_MIN_INTERVAL = 5.0
 RECONNECT_MAX_INTERVAL = 300.0
 
+# Milliseconds. A device that has stopped answering will not answer the
+# notification deletions either, and waiting the full timeout on each of a few
+# hundred of them would take the teardown into the minutes.
+ADS_TIMEOUT = 5000
+TEARDOWN_TIMEOUT = 100
+
 
 @dataclass
 class AdsSubscription:
@@ -87,32 +93,70 @@ class AdsHub:
         self._probing = False
         self._connected = False
         self._closed = False
+        self._ads_state: int | None = None
+        self._last_error: str | None = None
         self._lock = threading.Lock()
 
     @property
     def connected(self) -> bool:
-        """Return whether the ADS device is currently answering."""
+        """Return whether the ADS device is answering and running."""
         return self._connected
 
+    @property
+    def ads_state(self) -> int | None:
+        """Return the device's last known ADS state, None if it went quiet."""
+        return self._ads_state
+
+    @property
+    def last_error(self) -> str | None:
+        """Return why the device last stopped answering, if it did."""
+        return self._last_error
+
     async def async_setup(self) -> None:
-        """Connect to the ADS device and watch the connection from then on."""
+        """Connect to the ADS device and watch it from then on."""
         await self._hass.async_add_executor_job(self._connect)
         self._cancel_keepalive = async_track_time_interval(
             self._hass, self._async_check_connection, KEEPALIVE_INTERVAL
         )
+        if not self._connected:
+            # The device answers, but its PLC program is not running, so
+            # there is nothing worth subscribing to yet.
+            _LOGGER.warning(
+                "The ADS device is reachable but not running (ADS state %s)",
+                self._ads_state,
+            )
+            self._async_schedule_reconnect(RECONNECT_MIN_INTERVAL)
 
     def _connect(self) -> None:
-        """Open the connection and confirm the device answers on it."""
+        """Open the connection and find out what the device is doing."""
         self._client.open()
+        self._client.set_timeout(ADS_TIMEOUT)
         # On Linux, open() only adds a route. Whether the device answers this
         # client's AMS NetID at all first shows up on a request.
         try:
-            self._client.read_state()
+            ads_state, _ = self._client.read_state()
         except pyads.ADSError:
             self._client.close()
             raise
         with self._lock:
-            self._connected = True
+            self._ads_state = ads_state
+            self._last_error = None
+            self._connected = ads_state == pyads.ADSSTATE_RUN
+
+    def _read_state(self) -> int | None:
+        """Read what the device is doing, remembering it and any error."""
+        with self._lock:
+            if self._closed:
+                return self._ads_state
+            try:
+                ads_state, _ = self._client.read_state()
+            except pyads.ADSError as err:
+                self._ads_state = None
+                self._last_error = str(err)
+            else:
+                self._ads_state = ads_state
+                self._last_error = None
+            return self._ads_state
 
     @callback
     def async_add_connection_listener(self, listener: CALLBACK_TYPE) -> CALLBACK_TYPE:
@@ -132,40 +176,69 @@ class AdsHub:
             return
         self._probing = True
         try:
-            error = await self._hass.async_add_executor_job(self._probe)
+            ads_state = await self._hass.async_add_executor_job(self._read_state)
         finally:
             self._probing = False
-        if error is None:
+        if ads_state == pyads.ADSSTATE_RUN or self._closed:
             return
-        _LOGGER.warning("Lost the connection to the ADS device: %s", error)
+        if ads_state is None:
+            _LOGGER.warning(
+                "Lost the connection to the ADS device: %s", self._last_error
+            )
+        else:
+            _LOGGER.warning("The ADS device stopped running (ADS state %s)", ads_state)
         await self._hass.async_add_executor_job(self._drop_connection)
         self._async_notify_listeners()
         self._async_schedule_reconnect(RECONNECT_MIN_INTERVAL)
 
-    def _probe(self) -> str | None:
-        """Return why the ADS device is not answering, or None if it is."""
-        with self._lock:
-            if self._closed:
-                return None
-            try:
-                self._client.read_state()
-            except pyads.ADSError as err:
-                return str(err)
-            return None
-
     def _drop_connection(self) -> None:
-        """Forget the notification handles the broken connection held.
+        """Give up the notifications, and the connection if the device is gone.
 
-        The connection itself is deliberately left open. Closing it tears
-        down the notification dispatchers inside the ADS library while it is
-        still delivering on them, which takes the whole process with it, and
-        the library owns the socket either way.
+        A device that has stopped running has already invalidated every
+        notification, so they go either way; the socket only has to be
+        rebuilt when the device stopped answering altogether, which the ADS
+        library does not recover from on its own.
         """
         with self._lock:
             self._connected = False
             self._subscription_ids_by_hnotify.clear()
+            handles = [
+                subscription.handles
+                for subscription in self._subscriptions.values()
+                if subscription.handles is not None
+            ]
             for subscription in self._subscriptions.values():
                 subscription.handles = None
+            unreachable = self._ads_state is None
+        # Releasing waits for in-flight callbacks, which take the lock
+        # themselves, so this has to run unlocked.
+        self._release_notifications(handles)
+        if not unreachable:
+            return
+        try:
+            self._client.close()
+        except pyads.ADSError as err:
+            _LOGGER.debug("Closing the ADS connection failed: %s", err)
+
+    def _release_notifications(self, handles: list[tuple[int, int]]) -> None:
+        """Hand the notification handles back to the ADS library.
+
+        This has to happen before the connection is closed. The library drops
+        its dispatcher for a notification whether or not the device answers
+        the deletion, and closing a connection whose dispatchers are still
+        live takes the whole process down with it.
+        """
+        if self._ads_state is None:
+            self._client.set_timeout(TEARDOWN_TIMEOUT)
+        for hnotify, huser in handles:
+            _LOGGER.debug("Deleting device notification %d, %d", hnotify, huser)
+            try:
+                self._client.del_device_notification(hnotify, huser)
+            except pyads.ADSError as err:
+                # Expected whenever the device is the reason we are here.
+                _LOGGER.debug(
+                    "Deleting device notification %d failed: %s", hnotify, err
+                )
 
     @callback
     def _async_schedule_reconnect(self, delay: float) -> None:
@@ -188,13 +261,14 @@ class AdsHub:
         self._async_schedule_reconnect(min(delay * 2, RECONNECT_MAX_INTERVAL))
 
     def _reconnect(self) -> bool:
-        """Subscribe again once the device answers, on the same connection.
-
-        Nothing is reopened: the port was never closed, so what has to come
-        back is the notifications, which the device forgets when it restarts.
-        """
-        if (error := self._probe()) is not None:
-            _LOGGER.debug("The ADS device is still not answering: %s", error)
+        """Reopen a closed connection, and resubscribe once the device runs."""
+        try:
+            self._client.open()
+            self._client.set_timeout(ADS_TIMEOUT)
+        except pyads.ADSError as err:
+            _LOGGER.debug("Reopening the ADS connection failed: %s", err)
+            return False
+        if self._read_state() != pyads.ADSSTATE_RUN:
             return False
         with self._lock:
             self._connected = True
@@ -209,25 +283,17 @@ class AdsHub:
         _LOGGER.debug("Shutting down ADS")
         with self._lock:
             self._closed = True
-            connected = self._connected
             self._connected = False
-            subscriptions = list(self._subscriptions.values())
+            handles = [
+                subscription.handles
+                for subscription in self._subscriptions.values()
+                if subscription.handles is not None
+            ]
             self._subscriptions.clear()
             self._subscription_ids_by_hnotify.clear()
         # Deleting a notification waits for its in-flight callbacks, which take
         # the lock themselves, so this has to run unlocked.
-        for subscription in subscriptions:
-            if (handles := subscription.handles) is None:
-                continue
-            _LOGGER.debug("Deleting device notification %d, %d", *handles)
-            try:
-                self._client.del_device_notification(*handles)
-            except pyads.ADSError as err:
-                _LOGGER.error(err)
-        if not connected:
-            # Closing a connection the device has already dropped is what
-            # crashes the ADS library; the port goes with the process anyway.
-            return
+        self._release_notifications(handles)
         try:
             self._client.close()
         except pyads.ADSError as err:

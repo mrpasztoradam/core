@@ -16,6 +16,10 @@ from . import build_notification
 def mock_pyads_connection() -> Generator[MagicMock]:
     """Mock the pyads Connection class."""
     with patch("pyads.Connection", autospec=True) as mock_connection:
+        mock_connection.return_value.read_state.return_value = (
+            pyads.ADSSTATE_RUN,
+            pyads.ADSSTATE_RUN,
+        )
         yield mock_connection
 
 
