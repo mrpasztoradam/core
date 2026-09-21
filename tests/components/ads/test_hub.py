@@ -7,7 +7,11 @@ from unittest.mock import MagicMock
 import pyads
 import pytest
 
-from homeassistant.components.ads.hub import AdsHub
+from homeassistant.components.ads.hub import (
+    NOTIFICATION_CYCLE_TIME,
+    NOTIFICATION_MAX_DELAY,
+    AdsHub,
+)
 
 from . import build_notification
 
@@ -224,3 +228,15 @@ def test_notification_for_unknown_handle(
     handler(build_notification(99, b"\x01"), "GVL.test")
 
     assert "Unknown device notification handle: 99" in caplog.text
+
+
+def test_notification_timing_is_tuned(hub: AdsHub, ads_client: MagicMock) -> None:
+    """Test subscriptions do not ask for pyads' 100 ns defaults."""
+    ads_client.add_device_notification.return_value = (1, 2)
+
+    hub.add_device_notification("GVL.test", pyads.PLCTYPE_INT, MagicMock())
+
+    attr = ads_client.add_device_notification.call_args.args[1]
+    # pyads takes milliseconds but reports back 100 ns ticks.
+    assert attr.cycle_time == NOTIFICATION_CYCLE_TIME * 1e4
+    assert attr.max_delay == NOTIFICATION_MAX_DELAY * 1e4

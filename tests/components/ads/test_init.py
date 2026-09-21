@@ -12,11 +12,14 @@ from homeassistant.components.ads import (
 )
 from homeassistant.components.ads.const import CONF_ADS_VAR, DATA_ADS, DOMAIN
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Context, HomeAssistant
+from homeassistant.exceptions import Unauthorized
 from homeassistant.setup import async_setup_component
 
 from . import ADS_CONFIG
 from .const import AMS_NET_ID, IP_ADDRESS, PORT
+
+from tests.common import MockUser
 
 
 async def test_setup(hass: HomeAssistant, mock_pyads_connection: MagicMock) -> None:
@@ -54,23 +57,61 @@ async def test_shutdown_on_stop(
     mock_pyads_connection.return_value.close.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    ("ads_type", "value", "written", "plc_datatype"),
+    [
+        pytest.param("int", 42, 42, pyads.PLCTYPE_INT, id="int"),
+        pytest.param("int", "42", 42, pyads.PLCTYPE_INT, id="int_as_text"),
+        pytest.param("real", 21.5, 21.5, pyads.PLCTYPE_REAL, id="real"),
+        pytest.param("real", "21.5", 21.5, pyads.PLCTYPE_REAL, id="real_as_text"),
+        pytest.param("lreal", "21.5", 21.5, pyads.PLCTYPE_LREAL, id="lreal_as_text"),
+        pytest.param("bool", "true", True, pyads.PLCTYPE_BOOL, id="bool_as_text"),
+        pytest.param("string", "hello", "hello", pyads.PLCTYPE_STRING, id="string"),
+    ],
+)
 async def test_write_data_by_name(
-    hass: HomeAssistant, mock_pyads_connection: MagicMock
+    hass: HomeAssistant,
+    mock_pyads_connection: MagicMock,
+    ads_type: str,
+    value: bool | float | str,
+    written: bool | float | str,
+    plc_datatype: type,
 ) -> None:
-    """Test the write action writes the value to the PLC."""
+    """Test the write action writes the value to the PLC as its ADS type."""
     assert await async_setup_component(hass, DOMAIN, {DOMAIN: ADS_CONFIG})
     await hass.async_block_till_done()
 
     await hass.services.async_call(
         DOMAIN,
         SERVICE_WRITE_DATA_BY_NAME,
-        {CONF_ADS_VAR: "GVL.setpoint", CONF_ADS_TYPE: "int", CONF_ADS_VALUE: 42},
+        {CONF_ADS_VAR: "GVL.setpoint", CONF_ADS_TYPE: ads_type, CONF_ADS_VALUE: value},
         blocking=True,
     )
 
     mock_pyads_connection.return_value.write_by_name.assert_called_once_with(
-        "GVL.setpoint", 42, pyads.PLCTYPE_INT
+        "GVL.setpoint", written, plc_datatype
     )
+
+
+async def test_write_data_by_name_requires_admin(
+    hass: HomeAssistant,
+    mock_pyads_connection: MagicMock,
+    hass_read_only_user: MockUser,
+) -> None:
+    """Test a non-admin user cannot write to the PLC."""
+    assert await async_setup_component(hass, DOMAIN, {DOMAIN: ADS_CONFIG})
+    await hass.async_block_till_done()
+
+    with pytest.raises(Unauthorized):
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_WRITE_DATA_BY_NAME,
+            {CONF_ADS_VAR: "GVL.setpoint", CONF_ADS_TYPE: "int", CONF_ADS_VALUE: 42},
+            blocking=True,
+            context=Context(user_id=hass_read_only_user.id),
+        )
+
+    mock_pyads_connection.return_value.write_by_name.assert_not_called()
 
 
 async def test_write_data_by_name_error(

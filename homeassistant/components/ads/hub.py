@@ -11,6 +11,14 @@ import pyads
 
 _LOGGER = logging.getLogger(__name__)
 
+# Both are milliseconds. pyads defaults to 1e-4 ms (100 ns) for each, which asks
+# the ADS server for the tightest possible change detection with no batching.
+# The cycle time tracks the PLC task cycle TF8040 recommends, since checking
+# faster than the program can change a value is wasted load; the delay lets the
+# router batch several changes into one telegram.
+NOTIFICATION_CYCLE_TIME = 45.0
+NOTIFICATION_MAX_DELAY = 100.0
+
 
 class NotificationItem(NamedTuple):
     """Data needed to dispatch a device notification."""
@@ -116,7 +124,11 @@ class AdsHub:
     ) -> int | None:
         """Add a notification to the ADS devices, returning its handle."""
 
-        attr = pyads.NotificationAttrib(ctypes.sizeof(plc_datatype))
+        attr = pyads.NotificationAttrib(
+            ctypes.sizeof(plc_datatype),
+            max_delay=NOTIFICATION_MAX_DELAY,
+            cycle_time=NOTIFICATION_CYCLE_TIME,
+        )
 
         with self._lock:
             if self._closed:
