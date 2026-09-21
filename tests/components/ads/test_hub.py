@@ -268,20 +268,20 @@ async def test_connection_loss_is_announced(
 
     assert not hub.connected
     listener.assert_called_once()
-    ads_client.close.assert_called_once()
+    # Closing a connection the device has dropped crashes the ADS library
+    # and takes the process with it, so the drop leaves it alone.
+    ads_client.close.assert_not_called()
 
 
-async def test_connection_loss_survives_a_failing_close(
+async def test_shutdown_leaves_a_dropped_connection_alone(
     hass: HomeAssistant, hub: AdsHub, ads_client: MagicMock
 ) -> None:
-    """Test a connection too far gone to close still ends up being rebuilt."""
-    ads_client.close.side_effect = pyads.ADSError(text="timeout")
-
+    """Test a connection the device already dropped is not closed on the way out."""
     await drop_connection(hass, ads_client)
-    ads_client.close.side_effect = None
-    await restore_connection(hass, ads_client)
 
-    assert hub.connected
+    await hub.async_shutdown()
+
+    ads_client.close.assert_not_called()
 
 
 async def test_connection_listener_can_be_dropped(
@@ -313,6 +313,7 @@ async def test_reconnect_resubscribes(
     await restore_connection(hass, ads_client)
 
     assert hub.connected
+    ads_client.open.assert_called_once()
     handler = ads_client.add_device_notification.call_args.args[2]
     handler(build_notification(7, b"\x01"), "GVL.test")
 
@@ -356,26 +357,26 @@ async def test_reconnect_backs_off(
 ) -> None:
     """Test a device that stays away is not asked again every few seconds."""
     await drop_connection(hass, ads_client)
-    ads_client.open.reset_mock()
+    ads_client.read_state.reset_mock()
 
     async_fire_time_changed(
         hass, dt_util.utcnow() + timedelta(seconds=RECONNECT_MIN_INTERVAL + 1)
     )
     await hass.async_block_till_done(wait_background_tasks=True)
-    assert ads_client.open.call_count == 1
+    assert ads_client.read_state.call_count == 1
 
     # The failed attempt pushed the next one out past the minimum interval.
     async_fire_time_changed(
         hass, dt_util.utcnow() + timedelta(seconds=RECONNECT_MIN_INTERVAL + 1)
     )
     await hass.async_block_till_done(wait_background_tasks=True)
-    assert ads_client.open.call_count == 1
+    assert ads_client.read_state.call_count == 1
 
     async_fire_time_changed(
         hass, dt_util.utcnow() + timedelta(seconds=RECONNECT_MIN_INTERVAL * 2 + 1)
     )
     await hass.async_block_till_done(wait_background_tasks=True)
-    assert ads_client.open.call_count == 2
+    assert ads_client.read_state.call_count == 2
 
 
 @pytest.mark.parametrize(

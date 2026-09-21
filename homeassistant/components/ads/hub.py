@@ -132,42 +132,40 @@ class AdsHub:
             return
         self._probing = True
         try:
-            alive = await self._hass.async_add_executor_job(self._probe)
+            error = await self._hass.async_add_executor_job(self._probe)
         finally:
             self._probing = False
-        if alive:
+        if error is None:
             return
+        _LOGGER.warning("Lost the connection to the ADS device: %s", error)
         await self._hass.async_add_executor_job(self._drop_connection)
         self._async_notify_listeners()
         self._async_schedule_reconnect(RECONNECT_MIN_INTERVAL)
 
-    def _probe(self) -> bool:
-        """Return whether the ADS device still answers."""
+    def _probe(self) -> str | None:
+        """Return why the ADS device is not answering, or None if it is."""
         with self._lock:
             if self._closed:
-                return True
+                return None
             try:
                 self._client.read_state()
             except pyads.ADSError as err:
-                _LOGGER.warning("Lost the connection to the ADS device: %s", err)
-                return False
-            return True
+                return str(err)
+            return None
 
     def _drop_connection(self) -> None:
-        """Close the dead connection and forget the handles it held.
+        """Forget the notification handles the broken connection held.
 
-        The notifications go with it, and deleting them one by one on a
-        connection that no longer answers only runs into the ADS timeout.
+        The connection itself is deliberately left open. Closing it tears
+        down the notification dispatchers inside the ADS library while it is
+        still delivering on them, which takes the whole process with it, and
+        the library owns the socket either way.
         """
         with self._lock:
             self._connected = False
             self._subscription_ids_by_hnotify.clear()
             for subscription in self._subscriptions.values():
                 subscription.handles = None
-            try:
-                self._client.close()
-            except pyads.ADSError as err:
-                _LOGGER.debug("Closing the ADS connection failed: %s", err)
 
     @callback
     def _async_schedule_reconnect(self, delay: float) -> None:
@@ -179,7 +177,7 @@ class AdsHub:
         )
 
     async def _async_reconnect(self, delay: float, now: datetime) -> None:
-        """Rebuild the connection, and every subscription that was on it."""
+        """Put the subscriptions back once the device answers again."""
         self._cancel_reconnect = None
         if self._closed:
             return
@@ -190,13 +188,16 @@ class AdsHub:
         self._async_schedule_reconnect(min(delay * 2, RECONNECT_MAX_INTERVAL))
 
     def _reconnect(self) -> bool:
-        """Open the connection again and resubscribe on it."""
-        try:
-            self._connect()
-        except pyads.ADSError as err:
-            _LOGGER.debug("Reconnecting to the ADS device failed: %s", err)
+        """Subscribe again once the device answers, on the same connection.
+
+        Nothing is reopened: the port was never closed, so what has to come
+        back is the notifications, which the device forgets when it restarts.
+        """
+        if (error := self._probe()) is not None:
+            _LOGGER.debug("The ADS device is still not answering: %s", error)
             return False
         with self._lock:
+            self._connected = True
             subscriptions = list(self._subscriptions.items())
         for subscription_id, subscription in subscriptions:
             self._register(subscription_id, subscription)
@@ -208,6 +209,7 @@ class AdsHub:
         _LOGGER.debug("Shutting down ADS")
         with self._lock:
             self._closed = True
+            connected = self._connected
             self._connected = False
             subscriptions = list(self._subscriptions.values())
             self._subscriptions.clear()
@@ -222,6 +224,10 @@ class AdsHub:
                 self._client.del_device_notification(*handles)
             except pyads.ADSError as err:
                 _LOGGER.error(err)
+        if not connected:
+            # Closing a connection the device has already dropped is what
+            # crashes the ADS library; the port goes with the process anyway.
+            return
         try:
             self._client.close()
         except pyads.ADSError as err:
