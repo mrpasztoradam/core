@@ -1,4 +1,35 @@
 {
+  "entity": {
+    "binary_sensor": {
+      "connection": {
+        "name": "ADS connection"
+      }
+    },
+    "sensor": {
+      "ads_state": {
+        "name": "ADS state",
+        "state": {
+          "config": "Configuration",
+          "error": "Error",
+          "idle": "Idle",
+          "init": "Init",
+          "invalid": "Invalid",
+          "loadcfg": "Loading configuration",
+          "powerfailure": "Power failure",
+          "powergood": "Power good",
+          "reconfig": "Reconfiguration",
+          "reset": "Reset",
+          "resume": "Resume",
+          "run": "Run",
+          "savecfg": "Saving configuration",
+          "shutdown": "Shutdown",
+          "start": "Start",
+          "stop": "Stop",
+          "suspend": "Suspend"
+        }
+      }
+    }
+  },
   "services": {
     "write_data_by_name": {
       "description": "Write a value to the connected ADS device.",

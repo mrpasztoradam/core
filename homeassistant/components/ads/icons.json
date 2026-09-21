@@ -1,4 +1,11 @@
 {
+  "entity": {
+    "sensor": {
+      "ads_state": {
+        "default": "mdi:chip"
+      }
+    }
+  },
   "services": {
     "write_data_by_name": {
       "service": "mdi:pencil"

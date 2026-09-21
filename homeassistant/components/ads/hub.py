@@ -103,6 +103,11 @@ class AdsHub:
         return self._connected
 
     @property
+    def identifier(self) -> str:
+        """Return a stable id for the device this hub is connected to."""
+        return f"{self._client.ams_netid}:{self._client.ams_port}"
+
+    @property
     def ads_state(self) -> int | None:
         """Return the device's last known ADS state, None if it went quiet."""
         return self._ads_state
@@ -254,10 +259,16 @@ class AdsHub:
         self._cancel_reconnect = None
         if self._closed:
             return
+        previous_state = self._ads_state
         if await self._hass.async_add_executor_job(self._reconnect):
             _LOGGER.info("Reconnected to the ADS device")
             self._async_notify_listeners()
             return
+        if self._ads_state != previous_state:
+            # Still down, but differently so. The keepalive stops probing once
+            # the connection is gone, so this is the only place a listener can
+            # learn that the device went from silent to stopped, or back.
+            self._async_notify_listeners()
         self._async_schedule_reconnect(min(delay * 2, RECONNECT_MAX_INTERVAL))
 
     def _reconnect(self) -> bool:

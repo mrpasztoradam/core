@@ -21,6 +21,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 from . import build_notification
+from .const import AMS_NET_ID, PORT
 
 from tests.common import async_fire_time_changed
 
@@ -29,6 +30,8 @@ from tests.common import async_fire_time_changed
 def ads_client() -> MagicMock:
     """Return a mocked pyads client for a device that is up and running."""
     client = MagicMock()
+    client.ams_netid = AMS_NET_ID
+    client.ams_port = PORT
     client.read_state.return_value = (pyads.ADSSTATE_RUN, pyads.ADSSTATE_RUN)
     return client
 
@@ -379,6 +382,55 @@ async def test_a_device_that_stops_running_is_not_disconnected_from(
     await restore_connection(hass, ads_client, attempt=2)
 
     assert hub.connected
+
+
+async def test_identifier_names_the_device(hub: AdsHub) -> None:
+    """Test the hub is identified by the device it is connected to."""
+    assert hub.identifier == f"{AMS_NET_ID}:{PORT}"
+
+
+async def test_a_failed_reconnect_announces_a_changed_state(
+    hass: HomeAssistant, hub: AdsHub, ads_client: MagicMock
+) -> None:
+    """Test a device that answers again without running is still reported.
+
+    The keepalive stops probing once the connection is gone, so a reconnect
+    attempt is the only place a listener can learn the device came back in a
+    state it cannot be used in.
+    """
+    listener = MagicMock()
+    hub.async_add_connection_listener(listener)
+    await drop_connection(hass, ads_client)
+    listener.reset_mock()
+
+    ads_client.read_state.side_effect = None
+    ads_client.read_state.return_value = (pyads.ADSSTATE_STOP, pyads.ADSSTATE_RUN)
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=RECONNECT_MIN_INTERVAL + 1)
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert not hub.connected
+    assert hub.ads_state == pyads.ADSSTATE_STOP
+    listener.assert_called_once()
+
+
+async def test_a_failed_reconnect_that_changes_nothing_is_quiet(
+    hass: HomeAssistant, hub: AdsHub, ads_client: MagicMock
+) -> None:
+    """Test a device that stays away does not wake the entities each retry."""
+    listener = MagicMock()
+    hub.async_add_connection_listener(listener)
+    await drop_connection(hass, ads_client)
+    listener.reset_mock()
+
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=RECONNECT_MIN_INTERVAL + 1)
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert not hub.connected
+    listener.assert_not_called()
 
 
 async def test_reconnect_resubscribes(

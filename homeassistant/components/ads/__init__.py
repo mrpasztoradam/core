@@ -12,9 +12,11 @@ from homeassistant.const import (
     CONF_IP_ADDRESS,
     CONF_PORT,
     EVENT_HOMEASSISTANT_STOP,
+    Platform,
 )
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.discovery import async_load_platform
 from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.typing import ConfigType
 
@@ -61,6 +63,10 @@ CONF_ADS_VALUE = "value"
 
 
 SERVICE_WRITE_DATA_BY_NAME = "write_data_by_name"
+
+# Platforms carrying the entities that report on the connection itself, rather
+# than on a configured PLC variable.
+HUB_PLATFORMS = (Platform.BINARY_SENSOR, Platform.SENSOR)
 
 
 def _ams_netid(value: str) -> str:
@@ -152,6 +158,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     hass.data[DATA_ADS] = ads
     hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, ads.async_shutdown)
+
+    for platform in HUB_PLATFORMS:
+        hass.async_create_task(async_load_platform(hass, platform, DOMAIN, {}, config))
 
     async def handle_write_data_by_name(call: ServiceCall) -> None:
         """Write a value to the connected ADS device."""

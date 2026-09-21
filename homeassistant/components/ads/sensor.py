@@ -3,6 +3,7 @@
 from typing import override
 
 import probatio
+import pyads
 
 from homeassistant.components.sensor import (
     CONF_STATE_CLASS,
@@ -21,10 +22,32 @@ from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType, StateTyp
 
 from . import ADS_TYPEMAP, CONF_ADS_FACTOR, CONF_ADS_TYPE
 from .const import CONF_ADS_VAR, DATA_ADS, STATE_KEY_STATE, AdsType
-from .entity import AdsEntity
+from .entity import AdsEntity, AdsHubEntity
 from .hub import AdsHub
 
 DEFAULT_NAME = "ADS sensor"
+
+# The ADS device states, as the sensor reports them. Keyed by the value
+# read_state() returns.
+ADS_STATES = {
+    pyads.ADSSTATE_INVALID: "invalid",
+    pyads.ADSSTATE_IDLE: "idle",
+    pyads.ADSSTATE_RESET: "reset",
+    pyads.ADSSTATE_INIT: "init",
+    pyads.ADSSTATE_START: "start",
+    pyads.ADSSTATE_RUN: "run",
+    pyads.ADSSTATE_STOP: "stop",
+    pyads.ADSSTATE_SAVECFG: "savecfg",
+    pyads.ADSSTATE_LOADCFG: "loadcfg",
+    pyads.ADSSTATE_POWERFAILURE: "powerfailure",
+    pyads.ADSSTATE_POWERGOOD: "powergood",
+    pyads.ADSSTATE_ERROR: "error",
+    pyads.ADSSTATE_SHUTDOWN: "shutdown",
+    pyads.ADSSTATE_SUSPEND: "suspend",
+    pyads.ADSSTATE_RESUME: "resume",
+    pyads.ADSSTATE_CONFIG: "config",
+    pyads.ADSSTATE_RECONFIG: "reconfig",
+}
 
 PLATFORM_SCHEMA = SENSOR_PLATFORM_SCHEMA.extend(
     {
@@ -65,6 +88,10 @@ def setup_platform(
 ) -> None:
     """Set up an ADS sensor device."""
     ads_hub = hass.data[DATA_ADS]
+
+    if discovery_info is not None:
+        add_entities([AdsStateSensor(ads_hub)])
+        return
 
     ads_var: str = config[CONF_ADS_VAR]
     ads_type: AdsType = config[CONF_ADS_TYPE]
@@ -126,3 +153,22 @@ class AdsSensor(AdsEntity, SensorEntity):
     def native_value(self) -> StateType:
         """Return the state of the device."""
         return self._state_dict[STATE_KEY_STATE]
+
+
+class AdsStateSensor(AdsHubEntity, SensorEntity):
+    """Representation of what the ADS device is doing."""
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = list(ADS_STATES.values())
+
+    def __init__(self, ads_hub: AdsHub) -> None:
+        """Initialize the ADS state sensor."""
+        super().__init__(ads_hub, "ads_state")
+
+    @property
+    @override
+    def native_value(self) -> str | None:
+        """Return the device's state, unknown while it is not answering."""
+        if (ads_state := self._ads_hub.ads_state) is None:
+            return None
+        return ADS_STATES.get(ads_state)

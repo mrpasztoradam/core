@@ -5,6 +5,7 @@ from asyncio import timeout
 import logging
 from typing import Any, override
 
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import EntityPlatform
@@ -126,3 +127,26 @@ class AdsEntity(Entity):
             await self.hass.async_add_executor_job(
                 self._ads_hub.unsubscribe, subscription
             )
+
+
+class AdsHubEntity(Entity):
+    """An entity reporting on the ADS connection itself, not on a variable."""
+
+    _attr_should_poll = False
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, ads_hub: AdsHub, key: str) -> None:
+        """Initialize a hub entity named by its translation key."""
+        self._ads_hub = ads_hub
+        self._attr_translation_key = key
+        # A colon cannot occur in a PLC symbol name, so this cannot collide
+        # with the symbols AdsEntity uses as unique ids.
+        self._attr_unique_id = f"{ads_hub.identifier}-{key}"
+
+    @override
+    async def async_added_to_hass(self) -> None:
+        """Follow the connection, which is what this entity reports on."""
+        self.async_on_remove(
+            self._ads_hub.async_add_connection_listener(self.async_write_ha_state)
+        )
