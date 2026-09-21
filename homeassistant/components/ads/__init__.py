@@ -55,11 +55,23 @@ ADS_VALUE_VALIDATORS: dict[AdsType, Callable[[Any], Any]] = {
 DEFAULT_ADS_VALUE_VALIDATOR = probatio.Coerce(int)
 
 CONF_ADS_FACTOR = "factor"
+CONF_LOCAL_NETID = "local_netid"
 CONF_ADS_TYPE = "adstype"
 CONF_ADS_VALUE = "value"
 
 
 SERVICE_WRITE_DATA_BY_NAME = "write_data_by_name"
+
+
+def _ams_netid(value: str) -> str:
+    """Validate an AMS NetID, which pyads rejects with a bare ValueError."""
+    octets = cv.string(value).split(".")
+    if len(octets) != 6 or not all(
+        octet.isdigit() and int(octet) < 256 for octet in octets
+    ):
+        raise probatio.Invalid(f"{value} is not an AMS NetID")
+    return value
+
 
 CONFIG_SCHEMA = probatio.Schema(
     {
@@ -68,6 +80,7 @@ CONFIG_SCHEMA = probatio.Schema(
                 probatio.Required(CONF_DEVICE): cv.string,
                 probatio.Required(CONF_PORT): cv.port,
                 probatio.Optional(CONF_IP_ADDRESS): cv.string,
+                probatio.Optional(CONF_LOCAL_NETID): _ams_netid,
             }
         )
     },
@@ -95,6 +108,19 @@ SCHEMA_SERVICE_WRITE_DATA_BY_NAME = probatio.All(
 )
 
 
+def _open_hub(client: pyads.Connection, local_netid: str | None) -> AdsHub:
+    """Open the connection, presenting a specific AMS NetID if one is set.
+
+    The PLC answers only NetIDs it has a route for, and the one the router
+    derives from the host IP changes whenever that IP does. Setting it is
+    Linux-only, process-wide, and has to precede opening the connection.
+    """
+    if local_netid is not None:
+        pyads.open_port()
+        pyads.set_local_address(local_netid)
+    return AdsHub(client)
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the ADS component."""
 
@@ -113,13 +139,16 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     client = pyads.Connection(net_id, port, ip_address)
 
     try:
-        ads = await hass.async_add_executor_job(AdsHub, client)
-    except pyads.ADSError:
+        ads = await hass.async_add_executor_job(
+            _open_hub, client, conf.get(CONF_LOCAL_NETID)
+        )
+    except pyads.ADSError as err:
         _LOGGER.error(
-            "Could not connect to ADS host (netid=%s, ip=%s, port=%s)",
+            "Could not connect to ADS host (netid=%s, ip=%s, port=%s): %s",
             net_id,
             ip_address,
             port,
+            err,
         )
         return False
 

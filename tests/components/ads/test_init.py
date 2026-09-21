@@ -1,6 +1,6 @@
 """Test the ADS component setup."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pyads
 import pytest
@@ -8,6 +8,7 @@ import pytest
 from homeassistant.components.ads import (
     CONF_ADS_TYPE,
     CONF_ADS_VALUE,
+    CONF_LOCAL_NETID,
     SERVICE_WRITE_DATA_BY_NAME,
 )
 from homeassistant.components.ads.const import CONF_ADS_VAR, DATA_ADS, DOMAIN
@@ -18,7 +19,7 @@ from homeassistant.exceptions import Unauthorized
 from homeassistant.setup import async_setup_component
 
 from . import ADS_CONFIG
-from .const import AMS_NET_ID, IP_ADDRESS, PORT
+from .const import AMS_NET_ID, IP_ADDRESS, LOCAL_NET_ID, PORT
 
 from tests.common import MockUser
 
@@ -31,6 +32,77 @@ async def test_setup(hass: HomeAssistant, mock_pyads_connection: MagicMock) -> N
     mock_pyads_connection.assert_called_once_with(AMS_NET_ID, PORT, IP_ADDRESS)
     mock_pyads_connection.return_value.open.assert_called_once()
     assert hass.data[DATA_ADS]
+
+
+async def test_setup_with_local_netid(
+    hass: HomeAssistant, mock_pyads_connection: MagicMock
+) -> None:
+    """Test the configured AMS NetID is presented before connecting."""
+    with (
+        patch("pyads.set_local_address") as mock_set_local_address,
+        patch("pyads.open_port") as mock_open_port,
+    ):
+        assert await async_setup_component(
+            hass, DOMAIN, {DOMAIN: {**ADS_CONFIG, CONF_LOCAL_NETID: LOCAL_NET_ID}}
+        )
+        await hass.async_block_till_done()
+
+    mock_open_port.assert_called_once()
+    mock_set_local_address.assert_called_once_with(LOCAL_NET_ID)
+    mock_pyads_connection.return_value.open.assert_called_once()
+
+
+async def test_setup_without_local_netid(
+    hass: HomeAssistant, mock_pyads_connection: MagicMock
+) -> None:
+    """Test the process-wide AMS NetID is left alone when unconfigured."""
+    with patch("pyads.set_local_address") as mock_set_local_address:
+        assert await async_setup_component(hass, DOMAIN, {DOMAIN: ADS_CONFIG})
+        await hass.async_block_till_done()
+
+    mock_set_local_address.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "local_netid",
+    [
+        pytest.param("nonsense", id="not_dotted"),
+        pytest.param("10.10.0.39.1", id="too_few_octets"),
+        pytest.param("10.10.0.39.1.1.1", id="too_many_octets"),
+        pytest.param("10.10.0.999.1.1", id="octet_out_of_range"),
+    ],
+)
+async def test_setup_with_invalid_local_netid(
+    hass: HomeAssistant, mock_pyads_connection: MagicMock, local_netid: str
+) -> None:
+    """Test a malformed AMS NetID is rejected instead of reaching pyads."""
+    with patch("pyads.set_local_address") as mock_set_local_address:
+        assert not await async_setup_component(
+            hass, DOMAIN, {DOMAIN: {**ADS_CONFIG, CONF_LOCAL_NETID: local_netid}}
+        )
+        await hass.async_block_till_done()
+
+    mock_set_local_address.assert_not_called()
+    assert DATA_ADS not in hass.data
+
+
+async def test_setup_local_netid_error(
+    hass: HomeAssistant,
+    mock_pyads_connection: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test the failure reason is logged, e.g. Windows, where it is unsupported."""
+    with patch(
+        "pyads.set_local_address",
+        side_effect=pyads.ADSError(text="SetLocalAddress is not supported"),
+    ):
+        assert not await async_setup_component(
+            hass, DOMAIN, {DOMAIN: {**ADS_CONFIG, CONF_LOCAL_NETID: LOCAL_NET_ID}}
+        )
+        await hass.async_block_till_done()
+
+    assert "SetLocalAddress is not supported" in caplog.text
+    assert DATA_ADS not in hass.data
 
 
 async def test_setup_without_config(
