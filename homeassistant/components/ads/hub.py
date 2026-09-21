@@ -101,7 +101,7 @@ class AdsHub:
         self._closed = False
         self._ads_state: int | None = None
         self._last_error: str | None = None
-        self._state_handles: tuple[int, int] | None = None
+        self._state_handles: tuple[int, int | None] | None = None
         self._lock = threading.Lock()
 
     @property
@@ -200,9 +200,9 @@ class AdsHub:
             return
         if handles is None:
             return
-        # Deleting this one always raises: an address has no symbol handle, but
-        # the ADS library releases one anyway. The notification still goes.
-        self._state_handles = (int(handles[0]), int(handles[1]))
+        # No symbol handle comes back for an address, and none is needed: the
+        # ADS library skips the release it does for a subscription by name.
+        self._state_handles = (int(handles[0]), handles[1])
 
     def _state_notification_callback(
         self, notification: Any, address: tuple[int, int]
@@ -299,7 +299,7 @@ class AdsHub:
         with self._lock:
             self._connected = False
             self._subscription_ids_by_hnotify.clear()
-            handles = [
+            handles: list[tuple[int, int | None]] = [
                 subscription.handles
                 for subscription in self._subscriptions.values()
                 if subscription.handles is not None
@@ -323,7 +323,7 @@ class AdsHub:
         except pyads.ADSError as err:
             _LOGGER.debug("Closing the ADS connection failed: %s", err)
 
-    def _release_notifications(self, handles: list[tuple[int, int]]) -> None:
+    def _release_notifications(self, handles: list[tuple[int, int | None]]) -> None:
         """Hand the notification handles back to the ADS library.
 
         This has to happen before the connection is closed. The library drops
@@ -396,7 +396,7 @@ class AdsHub:
         with self._lock:
             self._closed = True
             self._connected = False
-            handles = [
+            handles: list[tuple[int, int | None]] = [
                 subscription.handles
                 for subscription in self._subscriptions.values()
                 if subscription.handles is not None
