@@ -1,6 +1,8 @@
 """Test the ADS entities reporting on the connection itself."""
 
 from datetime import timedelta
+import struct
+import threading
 from unittest.mock import MagicMock
 
 import pyads
@@ -14,8 +16,9 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
-from . import ADS_CONFIG
-from .const import AMS_NET_ID, PORT
+from . import ADS_CONFIG, build_notification
+from .conftest import DEVICE_STATE_ADDRESS
+from .const import AMS_NET_ID, PORT, STATE_HANDLES
 
 from tests.common import async_fire_time_changed
 
@@ -25,7 +28,9 @@ STATE_ENTITY_ID = "sensor.ads_state"
 
 @pytest.fixture
 async def ads_component(
-    hass: HomeAssistant, mock_pyads_connection: MagicMock
+    hass: HomeAssistant,
+    mock_pyads_connection: MagicMock,
+    mock_ads_notifications: dict[str, bytes],
 ) -> MagicMock:
     """Set up the ADS component and return the mocked client."""
     assert await async_setup_component(hass, DOMAIN, {DOMAIN: ADS_CONFIG})
@@ -81,12 +86,16 @@ async def test_a_device_that_goes_quiet(
 async def test_a_device_that_stops_running(
     hass: HomeAssistant, ads_component: MagicMock
 ) -> None:
-    """Test a reachable device that is not in run is reported as such."""
+    """Test a stopped PLC program does not read as a lost connection.
+
+    The device is still answering; only the program that would act on a
+    command is not running.
+    """
     ads_component.read_state.return_value = (pyads.ADSSTATE_STOP, pyads.ADSSTATE_RUN)
     async_fire_time_changed(hass, dt_util.utcnow() + KEEPALIVE_INTERVAL)
     await hass.async_block_till_done(wait_background_tasks=True)
 
-    assert hass.states.get(CONNECTION_ENTITY_ID).state == STATE_OFF
+    assert hass.states.get(CONNECTION_ENTITY_ID).state == STATE_ON
     assert hass.states.get(STATE_ENTITY_ID).state == "stop"
 
 
@@ -100,7 +109,7 @@ async def test_a_state_change_while_disconnected_is_reported(
     ads_component.read_state.return_value = (pyads.ADSSTATE_CONFIG, pyads.ADSSTATE_RUN)
     await retry_reconnect(hass)
 
-    assert hass.states.get(CONNECTION_ENTITY_ID).state == STATE_OFF
+    assert hass.states.get(CONNECTION_ENTITY_ID).state == STATE_ON
     assert hass.states.get(STATE_ENTITY_ID).state == "config"
 
 
@@ -114,3 +123,25 @@ async def test_reconnecting_is_reported(
 
     assert hass.states.get(CONNECTION_ENTITY_ID).state == STATE_ON
     assert hass.states.get(STATE_ENTITY_ID).state == "run"
+
+
+async def test_a_pushed_state_lands_without_a_probe(
+    hass: HomeAssistant, ads_component: MagicMock
+) -> None:
+    """Test the entities follow the device inside a cycle, not a keepalive."""
+    ads_component.read_state.return_value = (pyads.ADSSTATE_STOP, pyads.ADSSTATE_RUN)
+    thread = threading.Thread(
+        target=ads_component.state_callback,
+        args=(
+            build_notification(
+                STATE_HANDLES[0], struct.pack("<H", pyads.ADSSTATE_STOP)
+            ),
+            DEVICE_STATE_ADDRESS,
+        ),
+    )
+    thread.start()
+    thread.join()
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert hass.states.get(STATE_ENTITY_ID).state == "stop"
+    assert hass.states.get(CONNECTION_ENTITY_ID).state == STATE_ON

@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Generator
 from itertools import count
+import struct
 import threading
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -9,8 +10,15 @@ from unittest.mock import MagicMock, patch
 import pyads
 import pytest
 
+from homeassistant.components.ads.hub import (
+    ADSIGRP_DEVICE_DATA,
+    ADSIOFFS_DEVDATA_ADSSTATE,
+)
+
 from . import build_notification
-from .const import AMS_NET_ID, PORT
+from .const import AMS_NET_ID, PORT, STATE_HANDLES
+
+DEVICE_STATE_ADDRESS = (ADSIGRP_DEVICE_DATA, ADSIOFFS_DEVDATA_ADSSTATE)
 
 
 @pytest.fixture
@@ -39,12 +47,18 @@ def mock_ads_notifications(
     handles = count(1)
 
     def _add_device_notification(
-        name: str,
+        name: str | tuple[int, int],
         attr: pyads.NotificationAttrib,
         callback: Callable[[Any, str], None],
     ) -> tuple[int, int]:
-        handle = next(handles)
-        payload = values.get(name, b"").ljust(attr.length, b"\x00")
+        if name == DEVICE_STATE_ADDRESS:
+            mock_pyads_connection.return_value.state_callback = callback
+            handle = STATE_HANDLES[0]
+            state = mock_pyads_connection.return_value.read_state.return_value[0]
+            payload = struct.pack("<H", state)
+        else:
+            handle = next(handles)
+            payload = values.get(name, b"").ljust(attr.length, b"\x00")
         # The hub registers the handle before releasing the lock the callback
         # takes, so the delivery cannot run ahead of the registration.
         threading.Thread(

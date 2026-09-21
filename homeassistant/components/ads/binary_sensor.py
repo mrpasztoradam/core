@@ -80,7 +80,13 @@ class AdsBinarySensor(AdsEntity, BinarySensorEntity):
 
 
 class AdsConnectionBinarySensor(AdsHubEntity, BinarySensorEntity):
-    """Representation of whether the ADS device is answering and running."""
+    """Representation of whether the ADS device is answering.
+
+    Deliberately not whether the integration can use it: a device whose PLC
+    program has stopped is still perfectly reachable, and reporting that as a
+    lost connection sends whoever is looking after the wrong problem. What the
+    device is doing belongs to the state sensor.
+    """
 
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
 
@@ -91,5 +97,5 @@ class AdsConnectionBinarySensor(AdsHubEntity, BinarySensorEntity):
     @property
     @override
     def is_on(self) -> bool:
-        """Return True while the device is connected."""
-        return self._ads_hub.connected
+        """Return True while the device is answering."""
+        return self._ads_hub.reachable

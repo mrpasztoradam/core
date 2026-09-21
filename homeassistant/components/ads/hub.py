@@ -41,6 +41,12 @@ RECONNECT_MAX_INTERVAL = 300.0
 ADS_TIMEOUT = 5000
 TEARDOWN_TIMEOUT = 100
 
+# The ADS server publishes its own state at this address, as a UINT16, and
+# pushes it on change like any other notification. pyads does not name either
+# constant.
+ADSIGRP_DEVICE_DATA = 0xF100
+ADSIOFFS_DEVDATA_ADSSTATE = 0x0000
+
 
 @dataclass
 class AdsSubscription:
@@ -95,6 +101,7 @@ class AdsHub:
         self._closed = False
         self._ads_state: int | None = None
         self._last_error: str | None = None
+        self._state_handles: tuple[int, int] | None = None
         self._lock = threading.Lock()
 
     @property
@@ -106,6 +113,11 @@ class AdsHub:
     def identifier(self) -> str:
         """Return a stable id for the device this hub is connected to."""
         return f"{self._client.ams_netid}:{self._client.ams_port}"
+
+    @property
+    def reachable(self) -> bool:
+        """Return whether the ADS device is answering, running or not."""
+        return self._ads_state is not None
 
     @property
     def ads_state(self) -> int | None:
@@ -147,6 +159,7 @@ class AdsHub:
             self._ads_state = ads_state
             self._last_error = None
             self._connected = ads_state == pyads.ADSSTATE_RUN
+        self._subscribe_to_state()
 
     def _read_state(self) -> int | None:
         """Read what the device is doing, remembering it and any error."""
@@ -162,6 +175,70 @@ class AdsHub:
                 self._ads_state = ads_state
                 self._last_error = None
             return self._ads_state
+
+    def _subscribe_to_state(self) -> None:
+        """Ask the device to push its state, so a change lands within a cycle.
+
+        The keepalive still has to run: a device that stops answering
+        altogether also stops sending notifications, and says nothing about it.
+        A server that will not push its state leaves that probe as the only
+        way to notice, which is what the integration did before.
+        """
+        attr = pyads.NotificationAttrib(
+            ctypes.sizeof(pyads.PLCTYPE_UINT),
+            max_delay=NOTIFICATION_MAX_DELAY,
+            cycle_time=NOTIFICATION_CYCLE_TIME,
+        )
+        try:
+            handles = self._client.add_device_notification(
+                (ADSIGRP_DEVICE_DATA, ADSIOFFS_DEVDATA_ADSSTATE),
+                attr,
+                self._state_notification_callback,
+            )
+        except pyads.ADSError as err:
+            _LOGGER.debug("The ADS device does not push its state: %s", err)
+            return
+        if handles is None:
+            return
+        # Deleting this one always raises: an address has no symbol handle, but
+        # the ADS library releases one anyway. The notification still goes.
+        self._state_handles = (int(handles[0]), int(handles[1]))
+
+    def _state_notification_callback(
+        self, notification: Any, address: tuple[int, int]
+    ) -> None:
+        """Handle the device reporting a change of its own ADS state."""
+        contents = notification.contents
+        data_address = (
+            ctypes.addressof(contents)
+            + pyads.structs.SAdsNotificationHeader.data.offset
+        )
+        data = (ctypes.c_ubyte * contents.cbSampleSize).from_address(data_address)
+        ads_state = struct.unpack_from("<H", bytearray(data))[0]
+
+        with self._lock:
+            if self._closed or ads_state == self._ads_state:
+                return
+            self._ads_state = ads_state
+            self._last_error = None
+
+        _LOGGER.debug("The ADS device moved to state %s", ads_state)
+        # Callbacks arrive on a pyads thread, so hop to the event loop.
+        self._hass.loop.call_soon_threadsafe(self._async_state_changed, ads_state)
+
+    @callback
+    def _async_state_changed(self, ads_state: int) -> None:
+        """Follow a pushed state change instead of waiting for the next probe."""
+        if self._closed:
+            return
+        self._async_notify_listeners()
+        if ads_state != pyads.ADSSTATE_RUN:
+            if self._connected:
+                self._hass.async_create_task(self._async_drop_and_retry())
+            return
+        if not self._connected:
+            # It is running again, so there is no reason to sit out the backoff.
+            self._async_retry_now()
 
     @callback
     def async_add_connection_listener(self, listener: CALLBACK_TYPE) -> CALLBACK_TYPE:
@@ -192,9 +269,24 @@ class AdsHub:
             )
         else:
             _LOGGER.warning("The ADS device stopped running (ADS state %s)", ads_state)
+        await self._async_drop_and_retry()
+
+    async def _async_drop_and_retry(self) -> None:
+        """Give up the unusable connection and start rebuilding it."""
+        if not self._connected:
+            return
         await self._hass.async_add_executor_job(self._drop_connection)
         self._async_notify_listeners()
         self._async_schedule_reconnect(RECONNECT_MIN_INTERVAL)
+
+    @callback
+    def _async_retry_now(self) -> None:
+        """Bring the pending reconnect attempt forward."""
+        if self._cancel_reconnect is None:
+            return
+        self._cancel_reconnect()
+        self._cancel_reconnect = None
+        self._async_schedule_reconnect(0)
 
     def _drop_connection(self) -> None:
         """Give up the notifications, and the connection if the device is gone.
@@ -215,6 +307,12 @@ class AdsHub:
             for subscription in self._subscriptions.values():
                 subscription.handles = None
             unreachable = self._ads_state is None
+            if unreachable and self._state_handles is not None:
+                # The socket is about to go, and the state notification with
+                # it. A device that is merely stopped keeps pushing, which is
+                # how the restart is noticed without waiting out the backoff.
+                handles.append(self._state_handles)
+                self._state_handles = None
         # Releasing waits for in-flight callbacks, which take the lock
         # themselves, so this has to run unlocked.
         self._release_notifications(handles)
@@ -279,7 +377,10 @@ class AdsHub:
         except pyads.ADSError as err:
             _LOGGER.debug("Reopening the ADS connection failed: %s", err)
             return False
-        if self._read_state() != pyads.ADSSTATE_RUN:
+        ads_state = self._read_state()
+        if ads_state is not None and self._state_handles is None:
+            self._subscribe_to_state()
+        if ads_state != pyads.ADSSTATE_RUN:
             return False
         with self._lock:
             self._connected = True
@@ -302,6 +403,9 @@ class AdsHub:
             ]
             self._subscriptions.clear()
             self._subscription_ids_by_hnotify.clear()
+            if self._state_handles is not None:
+                handles.append(self._state_handles)
+                self._state_handles = None
         # Deleting a notification waits for its in-flight callbacks, which take
         # the lock themselves, so this has to run unlocked.
         self._release_notifications(handles)

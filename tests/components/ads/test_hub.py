@@ -1,8 +1,10 @@
 """Test the ADS hub."""
 
 from collections.abc import AsyncGenerator
+import ctypes
 from datetime import timedelta
 import struct
+import threading
 from typing import Any
 from unittest.mock import MagicMock, call
 
@@ -21,7 +23,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 from . import build_notification
-from .const import AMS_NET_ID, PORT
+from .conftest import DEVICE_STATE_ADDRESS
+from .const import AMS_NET_ID, PORT, STATE_HANDLES
 
 from tests.common import async_fire_time_changed
 
@@ -33,6 +36,17 @@ def ads_client() -> MagicMock:
     client.ams_netid = AMS_NET_ID
     client.ams_port = PORT
     client.read_state.return_value = (pyads.ADSSTATE_RUN, pyads.ADSSTATE_RUN)
+
+    def add_device_notification(
+        data: str | tuple[int, int], attr: pyads.NotificationAttrib, callback: Any
+    ) -> tuple[int, int] | None:
+        """Issue a handle of its own for the notification on the device state."""
+        if data == DEVICE_STATE_ADDRESS:
+            client.state_callback = callback
+            return STATE_HANDLES
+        return client.add_device_notification.return_value
+
+    client.add_device_notification.side_effect = add_device_notification
     return client
 
 
@@ -49,6 +63,24 @@ async def drop_connection(hass: HomeAssistant, ads_client: MagicMock) -> None:
     """Let the next keepalive probe find the device gone."""
     ads_client.read_state.side_effect = pyads.ADSError(text="timeout")
     async_fire_time_changed(hass, dt_util.utcnow() + KEEPALIVE_INTERVAL)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+
+async def push_state(
+    hass: HomeAssistant, ads_client: MagicMock, ads_state: int
+) -> None:
+    """Deliver an ADS state the way the device pushes one, on its own thread."""
+    ads_client.read_state.side_effect = None
+    ads_client.read_state.return_value = (ads_state, pyads.ADSSTATE_RUN)
+    thread = threading.Thread(
+        target=ads_client.state_callback,
+        args=(
+            build_notification(STATE_HANDLES[0], struct.pack("<H", ads_state)),
+            DEVICE_STATE_ADDRESS,
+        ),
+    )
+    thread.start()
+    thread.join()
     await hass.async_block_till_done(wait_background_tasks=True)
 
 
@@ -214,6 +246,7 @@ async def test_subscribe_closed_connection(hub: AdsHub, ads_client: MagicMock) -
 async def test_subscribe_after_shutdown(hub: AdsHub, ads_client: MagicMock) -> None:
     """Test a late subscription is refused once the hub is shut down."""
     await hub.async_shutdown()
+    ads_client.add_device_notification.reset_mock()
 
     assert hub.subscribe("GVL.test", pyads.PLCTYPE_INT, MagicMock()) is None
 
@@ -255,7 +288,10 @@ async def test_shutdown(hub: AdsHub, ads_client: MagicMock) -> None:
 
     await hub.async_shutdown()
 
-    ads_client.del_device_notification.assert_called_once_with(1, 2)
+    assert ads_client.del_device_notification.call_args_list == [
+        call(1, 2),
+        call(*STATE_HANDLES),
+    ]
     ads_client.close.assert_called_once()
 
 
@@ -472,6 +508,7 @@ async def test_subscription_id_survives_a_reconnect(
     # holds still reaches the one the device issued on the way back.
     assert ads_client.del_device_notification.call_args_list == [
         call(1, 2),
+        call(*STATE_HANDLES),
         call(7, 8),
     ]
 
@@ -612,3 +649,91 @@ async def test_notification_timing_is_tuned(hub: AdsHub, ads_client: MagicMock) 
     # pyads takes milliseconds but reports back 100 ns ticks.
     assert attr.cycle_time == NOTIFICATION_CYCLE_TIME * 1e4
     assert attr.max_delay == NOTIFICATION_MAX_DELAY * 1e4
+
+
+async def test_setup_subscribes_to_the_device_state(
+    hub: AdsHub, ads_client: MagicMock
+) -> None:
+    """Test the device is asked to push its state, not only polled for it."""
+    assert hub._state_handles == STATE_HANDLES
+    address, attr, _ = ads_client.add_device_notification.call_args[0]
+    assert address == DEVICE_STATE_ADDRESS
+    assert attr.length == ctypes.sizeof(pyads.PLCTYPE_UINT)
+
+
+async def test_a_device_that_will_not_push_its_state(
+    hass: HomeAssistant, ads_client: MagicMock
+) -> None:
+    """Test a server that refuses the subscription is still polled."""
+    ads_client.add_device_notification.side_effect = pyads.ADSError(text="unsupported")
+    hub = AdsHub(hass, ads_client)
+
+    await hub.async_setup()
+
+    assert hub.connected
+    assert hub._state_handles is None
+
+    await drop_connection(hass, ads_client)
+    assert not hub.connected
+
+    await hub.async_shutdown()
+
+
+async def test_a_pushed_stop_drops_the_connection(
+    hass: HomeAssistant, hub: AdsHub, ads_client: MagicMock
+) -> None:
+    """Test a state change lands without waiting for the next probe."""
+    listener = MagicMock()
+    hub.async_add_connection_listener(listener)
+
+    await push_state(hass, ads_client, pyads.ADSSTATE_STOP)
+
+    assert not hub.connected
+    assert hub.ads_state == pyads.ADSSTATE_STOP
+    assert hub.reachable
+    assert listener.called
+    # Only the one setup made: the drop did not need a probe of its own.
+    ads_client.read_state.assert_called_once()
+
+
+async def test_a_pushed_run_reconnects_without_the_backoff(
+    hass: HomeAssistant, hub: AdsHub, ads_client: MagicMock
+) -> None:
+    """Test a device that says it is running again is not left waiting."""
+    await push_state(hass, ads_client, pyads.ADSSTATE_STOP)
+    assert not hub.connected
+
+    await push_state(hass, ads_client, pyads.ADSSTATE_RUN)
+    # Far short of the pending 5 s retry, which the push brought forward.
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert hub.connected
+
+
+async def test_a_stopped_device_keeps_pushing(
+    hass: HomeAssistant, hub: AdsHub, ads_client: MagicMock
+) -> None:
+    """Test the state notification survives a drop that keeps the socket.
+
+    It is the only thing that can announce the restart, so releasing it would
+    put recovery back on the reconnect backoff.
+    """
+    await push_state(hass, ads_client, pyads.ADSSTATE_STOP)
+
+    assert hub._state_handles == STATE_HANDLES
+    assert call(*STATE_HANDLES) not in ads_client.del_device_notification.mock_calls
+
+
+async def test_a_silent_device_loses_and_regains_the_state_notification(
+    hass: HomeAssistant, hub: AdsHub, ads_client: MagicMock
+) -> None:
+    """Test the notification is rebuilt with the socket it was made on."""
+    await drop_connection(hass, ads_client)
+
+    assert hub._state_handles is None
+    assert call(*STATE_HANDLES) in ads_client.del_device_notification.mock_calls
+
+    await restore_connection(hass, ads_client)
+
+    assert hub._state_handles == STATE_HANDLES
