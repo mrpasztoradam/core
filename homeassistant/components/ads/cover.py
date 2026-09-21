@@ -132,7 +132,7 @@ class AdsCover(AdsEntity, CoverEntity):
 
     @property
     @override
-    def current_cover_position(self) -> int:
+    def current_cover_position(self) -> int | None:
         """Return current position of cover."""
         return self._state_dict[STATE_KEY_POSITION]
 

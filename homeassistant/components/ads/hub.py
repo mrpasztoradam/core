@@ -1,23 +1,30 @@
 """Support for Automation Device Specification (ADS)."""
 
-from collections import namedtuple
+from collections.abc import Callable
 import ctypes
 import logging
 import struct
 import threading
+from typing import Any, NamedTuple
 
 import pyads
 
 _LOGGER = logging.getLogger(__name__)
 
-# Tuple to hold data needed for notification
-NotificationItem = namedtuple(  # noqa: PYI024
-    "NotificationItem", "hnotify huser name plc_datatype callback"
-)
+
+class NotificationItem(NamedTuple):
+    """Data needed to dispatch a device notification."""
+
+    hnotify: int
+    huser: int
+    name: str
+    plc_datatype: type
+    callback: Callable[[str, Any], None]
+
 
 # Types not listed here are handled separately or unsupported.
 UNPACK_FORMATS = {
-    pyads.PLCTYPE_BYTE: "<b",
+    pyads.PLCTYPE_BYTE: "<B",
     pyads.PLCTYPE_INT: "<h",
     pyads.PLCTYPE_UINT: "<H",
     pyads.PLCTYPE_SINT: "<b",
@@ -28,28 +35,26 @@ UNPACK_FORMATS = {
     pyads.PLCTYPE_DWORD: "<I",
     pyads.PLCTYPE_LREAL: "<d",
     pyads.PLCTYPE_REAL: "<f",
-    pyads.PLCTYPE_TOD: "<i",  # Treat as DINT
-    pyads.PLCTYPE_DATE: "<i",  # Treat as DINT
-    pyads.PLCTYPE_DT: "<i",  # Treat as DINT
-    pyads.PLCTYPE_TIME: "<i",  # Treat as DINT
+    pyads.PLCTYPE_TOD: "<i",  # c_int, unlike the other time types
+    pyads.PLCTYPE_DATE: "<I",
+    pyads.PLCTYPE_DT: "<I",
+    pyads.PLCTYPE_TIME: "<I",
 }
 
 
 class AdsHub:
     """Representation of an ADS connection."""
 
-    def __init__(self, ads_client):
+    def __init__(self, ads_client: pyads.Connection) -> None:
         """Initialize the ADS hub."""
         self._client = ads_client
         self._client.open()
 
-        # All ADS devices are registered here
-        self._devices = []
-        self._notification_items = {}
+        self._notification_items: dict[int, NotificationItem] = {}
         self._closed = False
         self._lock = threading.Lock()
 
-    def shutdown(self, *args, **kwargs):
+    def shutdown(self, *args: Any, **kwargs: Any) -> None:
         """Shutdown ADS connection."""
 
         _LOGGER.debug("Shutting down ADS")
@@ -76,11 +81,7 @@ class AdsHub:
         except pyads.ADSError as err:
             _LOGGER.error(err)
 
-    def register_device(self, device):
-        """Register a new device."""
-        self._devices.append(device)
-
-    def write_by_name(self, name, value, plc_datatype):
+    def write_by_name(self, name: str, value: Any, plc_datatype: type) -> None:
         """Write a value to the device."""
 
         with self._lock:
@@ -88,13 +89,13 @@ class AdsHub:
             # started after shutdown began would race the teardown.
             if self._closed:
                 _LOGGER.debug("Not writing %s, the hub is shut down", name)
-                return None
+                return
             try:
-                return self._client.write_by_name(name, value, plc_datatype)
+                self._client.write_by_name(name, value, plc_datatype)
             except pyads.ADSError as err:
                 _LOGGER.error("Error writing %s: %s", name, err)
 
-    def read_by_name(self, name, plc_datatype):
+    def read_by_name(self, name: str, plc_datatype: type) -> Any:
         """Read a value from the device."""
 
         with self._lock:
@@ -105,8 +106,14 @@ class AdsHub:
                 return self._client.read_by_name(name, plc_datatype)
             except pyads.ADSError as err:
                 _LOGGER.error("Error reading %s: %s", name, err)
+                return None
 
-    def add_device_notification(self, name, plc_datatype, notification_callback):
+    def add_device_notification(
+        self,
+        name: str,
+        plc_datatype: type,
+        notification_callback: Callable[[str, Any], None],
+    ) -> int | None:
         """Add a notification to the ADS devices, returning its handle."""
 
         attr = pyads.NotificationAttrib(ctypes.sizeof(plc_datatype))
@@ -153,7 +160,7 @@ class AdsHub:
         except pyads.ADSError as err:
             _LOGGER.error(err)
 
-    def _device_notification_callback(self, notification, name):
+    def _device_notification_callback(self, notification: Any, name: str) -> None:
         """Handle device notifications."""
         contents = notification.contents
         hnotify = int(contents.hNotification)
@@ -175,6 +182,7 @@ class AdsHub:
             _LOGGER.error("Unknown device notification handle: %d", hnotify)
             return
 
+        value: Any
         plc_datatype = notification_item.plc_datatype
         if plc_datatype == pyads.PLCTYPE_BOOL:
             value = bool(struct.unpack("<?", bytearray(data))[0])

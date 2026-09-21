@@ -60,7 +60,7 @@ class AdsBinarySensor(AdsEntity, BinarySensorEntity):
     ) -> None:
         """Initialize ADS binary sensor."""
         super().__init__(ads_hub, name, ads_var)
-        self._attr_device_class = device_class or BinarySensorDeviceClass.MOVING
+        self._attr_device_class = device_class
 
     @override
     async def async_added_to_hass(self) -> None:
@@ -69,6 +69,6 @@ class AdsBinarySensor(AdsEntity, BinarySensorEntity):
 
     @property
     @override
-    def is_on(self) -> bool:
+    def is_on(self) -> bool | None:
         """Return True if the entity is on."""
         return self._state_dict[STATE_KEY_STATE]

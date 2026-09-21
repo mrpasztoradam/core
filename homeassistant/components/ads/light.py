@@ -153,7 +153,7 @@ class AdsLight(AdsEntity, LightEntity):
 
     @property
     @override
-    def is_on(self) -> bool:
+    def is_on(self) -> bool | None:
         """Return True if the entity is on."""
         return self._state_dict[STATE_KEY_STATE]
 

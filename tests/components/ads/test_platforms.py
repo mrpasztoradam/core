@@ -57,6 +57,13 @@ SELECT_OPTIONS = ["off", "day", "night"]
             id="binary_sensor",
         ),
         pytest.param(
+            BINARY_SENSOR_DOMAIN,
+            {"adsvar": "GVL.contact", "name": "Contact"},
+            {"GVL.contact": BOOL_FALSE},
+            "binary_sensor.contact",
+            id="binary_sensor_without_device_class",
+        ),
+        pytest.param(
             SENSOR_DOMAIN,
             {
                 "adsvar": "GVL.temperature",

@@ -57,9 +57,9 @@ class AdsEntity(Entity):
     ) -> None:
         """Register device notification."""
 
-        def update(name, value):
+        def update(name: str, value: Any) -> None:
             """Handle device notifications."""
-            _LOGGER.debug("Variable %s changed its value to %d", name, value)
+            _LOGGER.debug("Variable %s changed its value to %s", name, value)
 
             if factor is None:
                 self._state_dict[state_key] = value

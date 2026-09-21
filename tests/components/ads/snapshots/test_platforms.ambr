@@ -13,6 +13,19 @@
     'state': 'on',
   })
 # ---
+# name: test_yaml_platform_setup[binary_sensor_without_device_class]
+  StateSnapshot({
+    'attributes': ReadOnlyDict({
+      <EntityStateAttribute.FRIENDLY_NAME: 'friendly_name'>: 'Contact',
+    }),
+    'context': <ANY>,
+    'entity_id': 'binary_sensor.contact',
+    'last_changed': <ANY>,
+    'last_reported': <ANY>,
+    'last_updated': <ANY>,
+    'state': 'off',
+  })
+# ---
 # name: test_yaml_platform_setup[cover]
   StateSnapshot({
     'attributes': ReadOnlyDict({

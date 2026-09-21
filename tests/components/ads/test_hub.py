@@ -182,6 +182,11 @@ def test_shutdown_ignores_ads_errors(hub: AdsHub, ads_client: MagicMock) -> None
     [
         pytest.param(pyads.PLCTYPE_BOOL, b"\x01", True, id="bool"),
         pytest.param(pyads.PLCTYPE_INT, struct.pack("<h", -42), -42, id="int"),
+        pytest.param(pyads.PLCTYPE_BYTE, struct.pack("<B", 200), 200, id="byte"),
+        pytest.param(
+            pyads.PLCTYPE_DT, struct.pack("<I", 2**31 + 1), 2**31 + 1, id="dt"
+        ),
+        pytest.param(pyads.PLCTYPE_TOD, struct.pack("<i", -1), -1, id="tod"),
         pytest.param(pyads.PLCTYPE_REAL, struct.pack("<f", 1.5), 1.5, id="real"),
         pytest.param(pyads.PLCTYPE_STRING, b"hello\x00rest", "hello", id="string"),
         pytest.param(
