@@ -117,6 +117,7 @@ class AdsCover(AdsEntity, CoverEntity):
     @override
     async def async_added_to_hass(self) -> None:
         """Register device notification."""
+        await super().async_added_to_hass()
         await self.async_initialize_device(self._ads_var, pyads.PLCTYPE_BOOL)
 
         if self._ads_var_position is not None:
@@ -170,8 +171,8 @@ class AdsCover(AdsEntity, CoverEntity):
     @property
     @override
     def available(self) -> bool:
-        """Return False if state has not been updated yet."""
-        return (
+        """Return False while disconnected or before the first update."""
+        return self._ads_hub.connected and (
             self._state_dict[STATE_KEY_STATE] is not None
             or self._state_dict[STATE_KEY_POSITION] is not None
         )

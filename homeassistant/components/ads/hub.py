@@ -2,12 +2,19 @@
 
 from collections.abc import Callable
 import ctypes
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from functools import partial
+from itertools import count
 import logging
 import struct
 import threading
-from typing import Any, NamedTuple
+from typing import Any
 
 import pyads
+
+from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -19,15 +26,28 @@ _LOGGER = logging.getLogger(__name__)
 NOTIFICATION_CYCLE_TIME = 45.0
 NOTIFICATION_MAX_DELAY = 100.0
 
+# The ADS device never announces that it went away, so the connection has to be
+# probed. A drop is noticed at most one interval after it happened.
+KEEPALIVE_INTERVAL = timedelta(seconds=30)
 
-class NotificationItem(NamedTuple):
-    """Data needed to dispatch a device notification."""
+# A PLC being restarted or redeployed is gone for minutes, so back off instead
+# of asking the router the same question every few seconds.
+RECONNECT_MIN_INTERVAL = 5.0
+RECONNECT_MAX_INTERVAL = 300.0
 
-    hnotify: int
-    huser: int
+
+@dataclass
+class AdsSubscription:
+    """A device notification, and the handles the current connection holds it by.
+
+    The handles are reissued by the ADS device, so they do not survive a
+    reconnect; everything needed to ask for them again does.
+    """
+
     name: str
     plc_datatype: type
     callback: Callable[[str, Any], None]
+    handles: tuple[int, int] | None = None
 
 
 # Types not listed here are handled separately or unsupported.
@@ -53,41 +73,169 @@ UNPACK_FORMATS = {
 class AdsHub:
     """Representation of an ADS connection."""
 
-    def __init__(self, ads_client: pyads.Connection) -> None:
+    def __init__(self, hass: HomeAssistant, ads_client: pyads.Connection) -> None:
         """Initialize the ADS hub."""
+        self._hass = hass
         self._client = ads_client
-        self._client.open()
 
-        self._notification_items: dict[int, NotificationItem] = {}
+        self._subscriptions: dict[int, AdsSubscription] = {}
+        self._next_subscription_id = count(1)
+        self._subscription_ids_by_hnotify: dict[int, int] = {}
+        self._connection_listeners: list[CALLBACK_TYPE] = []
+        self._cancel_keepalive: CALLBACK_TYPE | None = None
+        self._cancel_reconnect: CALLBACK_TYPE | None = None
+        self._probing = False
+        self._connected = False
         self._closed = False
         self._lock = threading.Lock()
 
-    def shutdown(self, *args: Any, **kwargs: Any) -> None:
+    @property
+    def connected(self) -> bool:
+        """Return whether the ADS device is currently answering."""
+        return self._connected
+
+    async def async_setup(self) -> None:
+        """Connect to the ADS device and watch the connection from then on."""
+        await self._hass.async_add_executor_job(self._connect)
+        self._cancel_keepalive = async_track_time_interval(
+            self._hass, self._async_check_connection, KEEPALIVE_INTERVAL
+        )
+
+    def _connect(self) -> None:
+        """Open the connection and confirm the device answers on it."""
+        self._client.open()
+        # On Linux, open() only adds a route. Whether the device answers this
+        # client's AMS NetID at all first shows up on a request.
+        try:
+            self._client.read_state()
+        except pyads.ADSError:
+            self._client.close()
+            raise
+        with self._lock:
+            self._connected = True
+
+    @callback
+    def async_add_connection_listener(self, listener: CALLBACK_TYPE) -> CALLBACK_TYPE:
+        """Register a listener called whenever the connection comes or goes."""
+        self._connection_listeners.append(listener)
+        return partial(self._connection_listeners.remove, listener)
+
+    @callback
+    def _async_notify_listeners(self) -> None:
+        """Tell the entities that the connection state changed."""
+        for listener in list(self._connection_listeners):
+            listener()
+
+    async def _async_check_connection(self, now: datetime) -> None:
+        """Probe the connection, and start rebuilding it once it has dropped."""
+        if not self._connected or self._probing:
+            return
+        self._probing = True
+        try:
+            alive = await self._hass.async_add_executor_job(self._probe)
+        finally:
+            self._probing = False
+        if alive:
+            return
+        await self._hass.async_add_executor_job(self._drop_connection)
+        self._async_notify_listeners()
+        self._async_schedule_reconnect(RECONNECT_MIN_INTERVAL)
+
+    def _probe(self) -> bool:
+        """Return whether the ADS device still answers."""
+        with self._lock:
+            if self._closed:
+                return True
+            try:
+                self._client.read_state()
+            except pyads.ADSError as err:
+                _LOGGER.warning("Lost the connection to the ADS device: %s", err)
+                return False
+            return True
+
+    def _drop_connection(self) -> None:
+        """Close the dead connection and forget the handles it held.
+
+        The notifications go with it, and deleting them one by one on a
+        connection that no longer answers only runs into the ADS timeout.
+        """
+        with self._lock:
+            self._connected = False
+            self._subscription_ids_by_hnotify.clear()
+            for subscription in self._subscriptions.values():
+                subscription.handles = None
+            try:
+                self._client.close()
+            except pyads.ADSError as err:
+                _LOGGER.debug("Closing the ADS connection failed: %s", err)
+
+    @callback
+    def _async_schedule_reconnect(self, delay: float) -> None:
+        """Try again after a delay that grows while the device stays away."""
+        if self._closed:
+            return
+        self._cancel_reconnect = async_call_later(
+            self._hass, delay, partial(self._async_reconnect, delay)
+        )
+
+    async def _async_reconnect(self, delay: float, now: datetime) -> None:
+        """Rebuild the connection, and every subscription that was on it."""
+        self._cancel_reconnect = None
+        if self._closed:
+            return
+        if await self._hass.async_add_executor_job(self._reconnect):
+            _LOGGER.info("Reconnected to the ADS device")
+            self._async_notify_listeners()
+            return
+        self._async_schedule_reconnect(min(delay * 2, RECONNECT_MAX_INTERVAL))
+
+    def _reconnect(self) -> bool:
+        """Open the connection again and resubscribe on it."""
+        try:
+            self._connect()
+        except pyads.ADSError as err:
+            _LOGGER.debug("Reconnecting to the ADS device failed: %s", err)
+            return False
+        with self._lock:
+            subscriptions = list(self._subscriptions.items())
+        for subscription_id, subscription in subscriptions:
+            self._register(subscription_id, subscription)
+        return True
+
+    def shutdown(self) -> None:
         """Shutdown ADS connection."""
 
         _LOGGER.debug("Shutting down ADS")
         with self._lock:
             self._closed = True
-            notification_items = list(self._notification_items.values())
-            self._notification_items.clear()
+            self._connected = False
+            subscriptions = list(self._subscriptions.values())
+            self._subscriptions.clear()
+            self._subscription_ids_by_hnotify.clear()
         # Deleting a notification waits for its in-flight callbacks, which take
         # the lock themselves, so this has to run unlocked.
-        for notification_item in notification_items:
-            _LOGGER.debug(
-                "Deleting device notification %d, %d",
-                notification_item.hnotify,
-                notification_item.huser,
-            )
+        for subscription in subscriptions:
+            if (handles := subscription.handles) is None:
+                continue
+            _LOGGER.debug("Deleting device notification %d, %d", *handles)
             try:
-                self._client.del_device_notification(
-                    notification_item.hnotify, notification_item.huser
-                )
+                self._client.del_device_notification(*handles)
             except pyads.ADSError as err:
                 _LOGGER.error(err)
         try:
             self._client.close()
         except pyads.ADSError as err:
             _LOGGER.error(err)
+
+    async def async_shutdown(self, event: Event | None = None) -> None:
+        """Stop watching the connection, then tear it down."""
+        if self._cancel_keepalive is not None:
+            self._cancel_keepalive()
+            self._cancel_keepalive = None
+        if self._cancel_reconnect is not None:
+            self._cancel_reconnect()
+            self._cancel_reconnect = None
+        await self._hass.async_add_executor_job(self.shutdown)
 
     def write_by_name(self, name: str, value: Any, plc_datatype: type) -> None:
         """Write a value to the device."""
@@ -116,59 +264,85 @@ class AdsHub:
                 _LOGGER.error("Error reading %s: %s", name, err)
                 return None
 
-    def add_device_notification(
+    def subscribe(
         self,
         name: str,
         plc_datatype: type,
         notification_callback: Callable[[str, Any], None],
     ) -> int | None:
-        """Add a notification to the ADS devices, returning its handle."""
+        """Subscribe to a variable, returning an id to unsubscribe it by.
 
-        attr = pyads.NotificationAttrib(
-            ctypes.sizeof(plc_datatype),
-            max_delay=NOTIFICATION_MAX_DELAY,
-            cycle_time=NOTIFICATION_CYCLE_TIME,
-        )
+        The id identifies the subscription for as long as the hub lives, unlike
+        the notification handle, which a reconnect replaces.
+        """
 
         with self._lock:
             if self._closed:
                 _LOGGER.debug("Not subscribing to %s, the hub is shut down", name)
                 return None
-            try:
-                handles = self._client.add_device_notification(
-                    name, attr, self._device_notification_callback
-                )
-            except pyads.ADSError as err:
-                _LOGGER.error("Error subscribing to %s: %s", name, err)
-                return None
-            if handles is None:
-                # pyads returns None instead of raising once the port is closed.
-                _LOGGER.debug("Not subscribing to %s, the connection is closed", name)
-                return None
-            hnotify, huser = handles
-            hnotify = int(hnotify)
-            self._notification_items[hnotify] = NotificationItem(
-                hnotify, huser, name, plc_datatype, notification_callback
-            )
+            subscription_id = next(self._next_subscription_id)
+            subscription = AdsSubscription(name, plc_datatype, notification_callback)
+            self._subscriptions[subscription_id] = subscription
 
-            _LOGGER.debug("Added device notification %d for variable %s", hnotify, name)
-            return hnotify
+        self._register(subscription_id, subscription)
+        return subscription_id
 
-    def delete_device_notification(self, hnotify: int) -> None:
-        """Delete a single device notification."""
+    def _register(self, subscription_id: int, subscription: AdsSubscription) -> None:
+        """Ask the ADS device to notify on a subscription's variable.
+
+        A subscription that cannot be registered stays on the hub, so a
+        variable the device does not have yet is picked up by a later reconnect.
+        """
+
+        attr = pyads.NotificationAttrib(
+            ctypes.sizeof(subscription.plc_datatype),
+            max_delay=NOTIFICATION_MAX_DELAY,
+            cycle_time=NOTIFICATION_CYCLE_TIME,
+        )
 
         with self._lock:
-            notification_item = self._notification_items.pop(hnotify, None)
-        if notification_item is None:
-            # Already gone, most likely torn down by shutdown().
+            if not self._connected or subscription_id not in self._subscriptions:
+                return
+            try:
+                handles = self._client.add_device_notification(
+                    subscription.name, attr, self._device_notification_callback
+                )
+            except pyads.ADSError as err:
+                _LOGGER.error("Error subscribing to %s: %s", subscription.name, err)
+                return
+            if handles is None:
+                # pyads returns None instead of raising once the port is closed.
+                _LOGGER.debug(
+                    "Not subscribing to %s, the connection is closed", subscription.name
+                )
+                return
+            hnotify, huser = int(handles[0]), int(handles[1])
+            subscription.handles = (hnotify, huser)
+            self._subscription_ids_by_hnotify[hnotify] = subscription_id
+
+            _LOGGER.debug(
+                "Added device notification %d for variable %s",
+                hnotify,
+                subscription.name,
+            )
+
+    def unsubscribe(self, subscription_id: int) -> None:
+        """Drop a single subscription."""
+
+        with self._lock:
+            subscription = self._subscriptions.pop(subscription_id, None)
+            handles = None if subscription is None else subscription.handles
+            if handles is not None:
+                del self._subscription_ids_by_hnotify[handles[0]]
+        if handles is None:
+            # Already gone, most likely torn down by shutdown(), or never
+            # registered on the current connection.
             return
-        _LOGGER.debug("Deleting device notification %d", hnotify)
+        _LOGGER.debug("Deleting device notification %d", handles[0])
         # Deleting waits for in-flight callbacks, which take the lock
         # themselves, so this has to run unlocked.
         try:
-            self._client.del_device_notification(
-                notification_item.hnotify, notification_item.huser
-            )
+            self._client.del_device_notification(*handles)
         except pyads.ADSError as err:
             _LOGGER.error(err)
 
@@ -186,16 +360,21 @@ class AdsHub:
         )
         data = (ctypes.c_ubyte * data_size).from_address(data_address)
 
-        # Acquire notification item
+        # Acquire the subscription the handle belongs to
         with self._lock:
-            notification_item = self._notification_items.get(hnotify)
+            subscription_id = self._subscription_ids_by_hnotify.get(hnotify)
+            subscription = (
+                None
+                if subscription_id is None
+                else self._subscriptions.get(subscription_id)
+            )
 
-        if not notification_item:
+        if subscription is None:
             _LOGGER.error("Unknown device notification handle: %d", hnotify)
             return
 
         value: Any
-        plc_datatype = notification_item.plc_datatype
+        plc_datatype = subscription.plc_datatype
         if plc_datatype == pyads.PLCTYPE_BOOL:
             value = bool(struct.unpack("<?", bytearray(data))[0])
         elif plc_datatype == pyads.PLCTYPE_STRING:
@@ -208,4 +387,4 @@ class AdsHub:
             value = bytearray(data)
             _LOGGER.warning("No callback available for this datatype")
 
-        notification_item.callback(notification_item.name, value)
+        subscription.callback(subscription.name, value)

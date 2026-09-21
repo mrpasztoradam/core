@@ -1,5 +1,6 @@
 """Test the ADS entity platforms set up from YAML."""
 
+from datetime import timedelta
 import struct
 from typing import Any
 from unittest.mock import MagicMock, call
@@ -9,7 +10,11 @@ import pytest
 from syrupy.assertion import SnapshotAssertion
 
 from homeassistant.components.ads.const import DATA_ADS, DOMAIN, STATE_KEY_STATE
-from homeassistant.components.ads.hub import AdsHub
+from homeassistant.components.ads.hub import (
+    KEEPALIVE_INTERVAL,
+    RECONNECT_MIN_INTERVAL,
+    AdsHub,
+)
 from homeassistant.components.ads.select import AdsSelect
 from homeassistant.components.ads.valve import AdsValve
 from homeassistant.components.binary_sensor import DOMAIN as BINARY_SENSOR_DOMAIN
@@ -37,8 +42,11 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
 
 from . import setup_ads_platform
+
+from tests.common import async_fire_time_changed
 
 BOOL_TRUE = b"\x01"
 BOOL_FALSE = b"\x00"
@@ -382,14 +390,14 @@ async def test_removing_an_entity_drops_its_subscription(
     await hass.async_block_till_done()
 
     hub = hass.data[DATA_ADS]
-    assert len(hub._notification_items) == 1
+    assert len(hub._subscriptions) == 1
 
     entity_registry.async_update_entity(
         "binary_sensor.motion", disabled_by=er.RegistryEntryDisabler.USER
     )
     await hass.async_block_till_done()
 
-    assert not hub._notification_items
+    assert not hub._subscriptions
     mock_pyads_connection.return_value.del_device_notification.assert_called_once()
 
 
@@ -418,5 +426,42 @@ async def test_renaming_an_entity_keeps_it_subscribed(
     await hass.async_block_till_done()
 
     hub = hass.data[DATA_ADS]
-    assert len(hub._notification_items) == 1
+    assert len(hub._subscriptions) == 1
     assert hass.states.get("binary_sensor.hallway").state == STATE_ON
+
+
+async def test_a_dropped_connection_makes_entities_unavailable(
+    hass: HomeAssistant,
+    mock_pyads_connection: MagicMock,
+    mock_ads_notifications: dict[str, bytes],
+) -> None:
+    """Test an entity stops reporting a value the PLC no longer confirms.
+
+    Without this the last value the PLC pushed stays on show as a live reading
+    for as long as Home Assistant runs.
+    """
+    mock_ads_notifications["GVL.motion"] = BOOL_TRUE
+
+    assert await setup_ads_platform(
+        hass,
+        BINARY_SENSOR_DOMAIN,
+        {"platform": DOMAIN, "adsvar": "GVL.motion", "name": "Motion"},
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.motion").state == STATE_ON
+
+    mock_pyads_connection.return_value.read_state.side_effect = pyads.ADSError(
+        text="timeout"
+    )
+    async_fire_time_changed(hass, dt_util.utcnow() + KEEPALIVE_INTERVAL)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert hass.states.get("binary_sensor.motion").state == STATE_UNAVAILABLE
+
+    mock_pyads_connection.return_value.read_state.side_effect = None
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=RECONNECT_MIN_INTERVAL + 1)
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert hass.states.get("binary_sensor.motion").state == STATE_ON

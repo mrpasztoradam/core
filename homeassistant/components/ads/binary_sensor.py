@@ -65,6 +65,7 @@ class AdsBinarySensor(AdsEntity, BinarySensorEntity):
     @override
     async def async_added_to_hass(self) -> None:
         """Register device notification."""
+        await super().async_added_to_hass()
         await self.async_initialize_device(self._ads_var, pyads.PLCTYPE_BOOL)
 
     @property

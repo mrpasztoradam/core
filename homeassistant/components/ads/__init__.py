@@ -108,17 +108,15 @@ SCHEMA_SERVICE_WRITE_DATA_BY_NAME = probatio.All(
 )
 
 
-def _open_hub(client: pyads.Connection, local_netid: str | None) -> AdsHub:
-    """Open the connection, presenting a specific AMS NetID if one is set.
+def _set_local_address(local_netid: str) -> None:
+    """Present a specific AMS NetID to the PLC.
 
     The PLC answers only NetIDs it has a route for, and the one the router
     derives from the host IP changes whenever that IP does. Setting it is
     Linux-only, process-wide, and has to precede opening the connection.
     """
-    if local_netid is not None:
-        pyads.open_port()
-        pyads.set_local_address(local_netid)
-    return AdsHub(client)
+    pyads.open_port()
+    pyads.set_local_address(local_netid)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -136,12 +134,12 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     ip_address = conf.get(CONF_IP_ADDRESS)
     port = conf[CONF_PORT]
 
-    client = pyads.Connection(net_id, port, ip_address)
+    ads = AdsHub(hass, pyads.Connection(net_id, port, ip_address))
 
     try:
-        ads = await hass.async_add_executor_job(
-            _open_hub, client, conf.get(CONF_LOCAL_NETID)
-        )
+        if (local_netid := conf.get(CONF_LOCAL_NETID)) is not None:
+            await hass.async_add_executor_job(_set_local_address, local_netid)
+        await ads.async_setup()
     except pyads.ADSError as err:
         _LOGGER.error(
             "Could not connect to ADS host (netid=%s, ip=%s, port=%s): %s",
@@ -153,7 +151,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         return False
 
     hass.data[DATA_ADS] = ads
-    hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, ads.shutdown)
+    hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, ads.async_shutdown)
 
     async def handle_write_data_by_name(call: ServiceCall) -> None:
         """Write a value to the connected ADS device."""

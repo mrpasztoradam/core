@@ -26,7 +26,7 @@ class AdsEntity(Entity):
         self._state_dict[STATE_KEY_STATE] = None
         self._ads_hub = ads_hub
         self._ads_var = ads_var
-        self._notification_handles: list[int] = []
+        self._subscriptions: list[int] = []
         self._first_updates: list[asyncio.Event] = []
         self._removed = False
         self._attr_unique_id = ads_var
@@ -47,6 +47,13 @@ class AdsEntity(Entity):
         """
         super().add_to_platform_start(hass, platform, parallel_updates)
         self._removed = False
+
+    @override
+    async def async_added_to_hass(self) -> None:
+        """Follow the connection, which gates this entity's availability."""
+        self.async_on_remove(
+            self._ads_hub.async_add_connection_listener(self.async_write_ha_state)
+        )
 
     async def async_initialize_device(
         self,
@@ -72,19 +79,19 @@ class AdsEntity(Entity):
 
         event = asyncio.Event()
 
-        handle = await self.hass.async_add_executor_job(
-            self._ads_hub.add_device_notification, ads_var, plctype, update
+        subscription = await self.hass.async_add_executor_job(
+            self._ads_hub.subscribe, ads_var, plctype, update
         )
-        if handle is None:
+        if subscription is None:
             return
         if self._removed:
             # Removed while this was subscribing, so the removal has already
-            # drained the handles and will not come back for this one.
+            # drained the subscriptions and will not come back for this one.
             await self.hass.async_add_executor_job(
-                self._ads_hub.delete_device_notification, handle
+                self._ads_hub.unsubscribe, subscription
             )
             return
-        self._notification_handles.append(handle)
+        self._subscriptions.append(subscription)
         self._first_updates.append(event)
         try:
             async with timeout(10):
@@ -97,8 +104,8 @@ class AdsEntity(Entity):
     @property
     @override
     def available(self) -> bool:
-        """Return False if state has not been updated yet."""
-        return self._state_dict[STATE_KEY_STATE] is not None
+        """Return False while disconnected or before the first update."""
+        return self._ads_hub.connected and self._state_dict[STATE_KEY_STATE] is not None
 
     @override
     async def async_will_remove_from_hass(self) -> None:
@@ -113,9 +120,9 @@ class AdsEntity(Entity):
         # Nothing will deliver a first update any more, so stop waiting for one.
         for event in self._first_updates:
             event.set()
-        handles = self._notification_handles
-        self._notification_handles = []
-        for handle in handles:
+        subscriptions = self._subscriptions
+        self._subscriptions = []
+        for subscription in subscriptions:
             await self.hass.async_add_executor_job(
-                self._ads_hub.delete_device_notification, handle
+                self._ads_hub.unsubscribe, subscription
             )
