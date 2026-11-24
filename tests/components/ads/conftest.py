@@ -1,19 +1,95 @@
 """Common fixtures for the ADS tests."""
 
 from collections.abc import Generator
-from unittest.mock import MagicMock, patch
+from typing import NamedTuple
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pytest_homeassistant.common import MockConfigEntry
 
-from homeassistant.components.ads.const import DOMAIN
+from homeassistant.components.ads import hub as ads_hub
+from homeassistant.components.ads.const import CONF_LOCAL_NET_ID, DOMAIN
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 
 from . import ADS_CONFIG, MockAdsDevice
+from .const import AMS_NET_ID, AUTO_NET_ID, LOCAL_NET_ID
+
+
+class MockPyadsLocalNetId(NamedTuple):
+    """Mocks for the pyads functions that read and set the local AMS NetID."""
+
+    open_port: MagicMock
+    get_local_address: MagicMock
+    set_local_address: MagicMock
+    close_port: MagicMock
+
+
+@pytest.fixture(autouse=True)
+def _reset_original_local_net_id() -> Generator[None]:
+    """Keep the cached original local AMS NetID from leaking between tests."""
+    yield
+    ads_hub._original_local_net_id = None
 
 
 @pytest.fixture
-def mock_pyads_connection() -> Generator[MagicMock]:
+def mock_pyads_local_net_id() -> Generator[MockPyadsLocalNetId]:
+    """Mock the pyads functions that read and set the local AMS NetID."""
+    with (
+        patch("pyads.open_port", autospec=True) as mock_open_port,
+        patch("pyads.get_local_address", autospec=True) as mock_get_local_address,
+        patch("pyads.set_local_address", autospec=True) as mock_set_local_address,
+        patch("pyads.close_port", autospec=True) as mock_close_port,
+    ):
+        mock_get_local_address.return_value.netid = AUTO_NET_ID
+        yield MockPyadsLocalNetId(
+            mock_open_port,
+            mock_get_local_address,
+            mock_set_local_address,
+            mock_close_port,
+        )
+
+
+@pytest.fixture
+def mock_config_entry() -> MockConfigEntry:
+    """Return the config entry of an ADS connection."""
+    return MockConfigEntry(domain=DOMAIN, title=AMS_NET_ID, data=ADS_CONFIG)
+
+
+@pytest.fixture
+def mock_config_entry_local_net_id() -> MockConfigEntry:
+    """Return the config entry of an ADS connection with a local AMS NetID."""
+    return MockConfigEntry(
+        domain=DOMAIN,
+        title=AMS_NET_ID,
+        data={**ADS_CONFIG, CONF_LOCAL_NET_ID: LOCAL_NET_ID},
+    )
+
+
+@pytest.fixture
+def mock_setup_entry() -> Generator[AsyncMock]:
+    """Mock setting up the config entry."""
+    with patch(
+        "homeassistant.components.ads.async_setup_entry", return_value=None
+    ) as mock_setup_entry:
+        yield mock_setup_entry
+
+
+@pytest.fixture
+def mock_validate_connection() -> Generator[MagicMock]:
+    """Mock the connection probe the config flow runs before creating an entry.
+
+    The probe opens a connection of its own, so leaving it in place would show
+    up in every test asserting on the hub's connection.
+    """
+    with patch(
+        "homeassistant.components.ads.config_flow._validate_connection"
+    ) as mock_validate:
+        yield mock_validate
+
+
+@pytest.fixture
+def mock_pyads_connection(mock_validate_connection: MagicMock) -> Generator[MagicMock]:
     """Mock the pyads Connection class."""
     with patch("pyads.Connection", autospec=True) as mock_connection:
         yield mock_connection

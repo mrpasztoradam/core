@@ -9,13 +9,17 @@ from unittest.mock import MagicMock
 import pyads
 import pytest
 
-from homeassistant.components.ads.const import DATA_ADS
 from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN, SwitchService
-from homeassistant.const import EVENT_HOMEASSISTANT_STOP, STATE_OFF, TargetKey
+from homeassistant.const import (
+    EVENT_HOMEASSISTANT_STOP,
+    STATE_OFF,
+    STATE_UNAVAILABLE,
+    TargetKey,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
-from . import MockAdsDevice, setup_ads_platform
+from . import MockAdsDevice, get_hub, setup_ads_platform
 
 ADS_VAR = "GVL.pump"
 ENTITY_ID = "switch.pump"
@@ -90,15 +94,14 @@ async def test_no_io_after_shutdown(
     hass: HomeAssistant,
     mock_pyads_connection: MagicMock,
     mock_ads_device: MockAdsDevice,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Test nothing is sent to the PLC once the connection is shut down."""
-    caplog.set_level(logging.DEBUG)
+    """Test an entity goes unavailable and sends nothing once the connection is shut down."""
     mock_ads_device.values[ADS_VAR] = BOOL_FALSE
     assert await setup_ads_platform(hass, SWITCH_DOMAIN, PLATFORM_CONFIG)
     hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
     await hass.async_block_till_done()
 
+    assert hass.states.get(ENTITY_ID).state == STATE_UNAVAILABLE
     await hass.services.async_call(
         SWITCH_DOMAIN,
         SwitchService.TURN_ON,
@@ -107,7 +110,6 @@ async def test_no_io_after_shutdown(
     )
 
     mock_pyads_connection.return_value.write_by_name.assert_not_called()
-    assert f"Not writing {ADS_VAR}, the hub is shut down" in caplog.text
 
 
 async def test_removal_delete_error(
@@ -165,6 +167,12 @@ async def test_removal_while_subscribing(
     ("method", "args", "message"),
     [
         pytest.param(
+            "write_by_name",
+            (ADS_VAR, True, pyads.PLCTYPE_BOOL),
+            f"Not writing {ADS_VAR}, the hub is shut down",
+            id="write",
+        ),
+        pytest.param(
             "read_by_name",
             (ADS_VAR, pyads.PLCTYPE_BOOL),
             f"Not reading {ADS_VAR}, the hub is shut down",
@@ -192,7 +200,7 @@ async def test_hub_refuses_io_after_shutdown(
     hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
     await hass.async_block_till_done()
 
-    hub = hass.data[DATA_ADS]
+    hub = get_hub(hass)
     assert await hass.async_add_executor_job(getattr(hub, method), *args) is None
 
     getattr(mock_pyads_connection.return_value, method).assert_not_called()
@@ -220,7 +228,7 @@ async def test_shutdown_waits_for_a_removal(
     entity_registry.async_remove(ENTITY_ID)
     await hass.async_add_executor_job(deleting.wait)
 
-    shutdown = hass.async_add_executor_job(hass.data[DATA_ADS].shutdown)
+    shutdown = hass.async_add_executor_job(get_hub(hass).shutdown)
     try:
         await asyncio.sleep(0.05)
         client.close.assert_not_called()

@@ -1,17 +1,15 @@
 """Services for the ADS integration."""
 
 from enum import StrEnum
-import logging
 
 import probatio
-import pyads
 
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 
-from .const import ADS_TYPEMAP, DATA_ADS, DOMAIN, AdsType
-
-_LOGGER = logging.getLogger(__name__)
+from .const import ADS_TYPEMAP, DOMAIN, AdsType
+from .hub import AdsConfigEntry
 
 
 class AdsService(StrEnum):
@@ -37,24 +35,32 @@ SCHEMA_SERVICE_WRITE_DATA_BY_NAME = probatio.Schema(
 )
 
 
-def _handle_write_data_by_name(call: ServiceCall) -> None:
+async def _async_handle_write_data_by_name(call: ServiceCall) -> None:
     """Write a value to the connected ADS device."""
-    ads = call.hass.data[DATA_ADS]
+    entries: list[AdsConfigEntry] = call.hass.config_entries.async_loaded_entries(
+        DOMAIN
+    )
+    if not entries:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN, translation_key="not_loaded"
+        )
+    ads = entries[0].runtime_data
     ads_var: str = call.data[AdsServiceArgument.ADSVAR]
     ads_type: AdsType = call.data[AdsServiceArgument.ADSTYPE]
     value: int = call.data[AdsServiceArgument.VALUE]
 
-    try:
-        ads.write_by_name(ads_var, value, ADS_TYPEMAP[ads_type])
-    except pyads.ADSError as err:
-        _LOGGER.error(err)
+    # The hub logs a write the PLC refuses instead of raising it.
+    await call.hass.async_add_executor_job(
+        ads.write_by_name, ads_var, value, ADS_TYPEMAP[ads_type]
+    )
 
 
-def setup_services(hass: HomeAssistant) -> None:
+@callback
+def async_setup_services(hass: HomeAssistant) -> None:
     """Register the ADS services."""
-    hass.services.register(
+    hass.services.async_register(
         DOMAIN,
         AdsService.WRITE_DATA_BY_NAME,
-        _handle_write_data_by_name,
+        _async_handle_write_data_by_name,
         schema=SCHEMA_SERVICE_WRITE_DATA_BY_NAME,
     )

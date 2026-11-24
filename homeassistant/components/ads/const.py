@@ -12,9 +12,14 @@ if TYPE_CHECKING:
 
 DOMAIN = "ads"
 
+# The hub of an unloaded entry, kept as the registry of the YAML entities that
+# outlive it, so they can be rebound once the entry is set up again.
 DATA_ADS: HassKey[AdsHub] = HassKey(DOMAIN)
 
+DEFAULT_PORT = 851
+
 CONF_ADS_VAR = "adsvar"
+CONF_LOCAL_NET_ID = "local_net_id"
 
 STATE_KEY_STATE = "state"
 

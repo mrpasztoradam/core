@@ -1,12 +1,25 @@
 """Support for Automation Device Specification (ADS)."""
 
+import asyncio
 from collections import namedtuple
+from collections.abc import Iterator
+from contextlib import contextmanager
 import ctypes
 import logging
 import struct
 import threading
+from typing import TYPE_CHECKING
 
 import pyads
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import PlatformNotReady
+
+from .const import DOMAIN
+
+if TYPE_CHECKING:
+    from .entity import AdsEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -16,23 +29,90 @@ NotificationItem = namedtuple(  # noqa: PYI024
 )
 
 
+_original_local_net_id: str | None = None
+
+# set_local_address() rebinds the whole process, so swapping the local AMS
+# NetID must never overlap a hub's I/O; both take this lock. It is reentrant
+# because connecting nests the override, the port open and the state read.
+_identity_lock = threading.RLock()
+
+
+def _set_local_address(net_id: str) -> None:
+    """Set the process-wide local AMS NetID."""
+    pyads.open_port()
+    try:
+        pyads.set_local_address(net_id)
+    finally:
+        pyads.close_port()
+
+
+def apply_local_net_id(local_net_id: str | None) -> None:
+    """Set a custom local AMS NetID, or restore the original once cleared."""
+    global _original_local_net_id  # noqa: PLW0603  # pylint: disable=global-statement
+    with _identity_lock:
+        if local_net_id is None and _original_local_net_id is None:
+            return
+        if _original_local_net_id is None:
+            # Cache the original NetID so it can be restored once cleared.
+            pyads.open_port()
+            try:
+                _original_local_net_id = pyads.get_local_address().netid
+            finally:
+                pyads.close_port()
+        _set_local_address(local_net_id or _original_local_net_id)
+
+
+@contextmanager
+def local_net_id_probe(local_net_id: str | None) -> Iterator[None]:
+    """Temporarily apply a local AMS NetID to probe a connection.
+
+    Restores whichever NetID was active beforehand, so a validation attempt
+    never leaves the process-wide ADS identity changed.
+    """
+    # Held across the probe, so neither another override nor a hub's I/O can
+    # run while the candidate identity is active.
+    with _identity_lock:
+        target_net_id = local_net_id or _original_local_net_id
+        if target_net_id is None:
+            yield
+            return
+        pyads.open_port()
+        try:
+            previous_net_id = pyads.get_local_address().netid
+        finally:
+            pyads.close_port()
+        _set_local_address(target_net_id)
+        try:
+            yield
+        finally:
+            _set_local_address(previous_net_id)
+
+
 class AdsHub:
     """Representation of an ADS connection."""
 
-    def __init__(self, ads_client):
+    def __init__(self, ads_client) -> None:
         """Initialize the ADS hub."""
         self._client = ads_client
-        self._client.open()
+
+        # Cancelled on unload, before the notifications are torn down.
+        self.resubscribe_task: asyncio.Task[None] | None = None
 
         # All ADS devices are registered here
-        self._devices = []
-        self._notification_items = {}
+        self._devices: list[AdsEntity] = []
+        # Separate from the I/O locks, so registering an entity never waits on
+        # a blocking PLC call from the event loop.
+        self._devices_lock = threading.Lock()
+        self._notification_items: dict[int, NotificationItem] = {}
         self._closed = False
         self._lock = threading.Lock()
         # Held across a notification delete, so shutdown cannot close the
         # client while a dispatcher is still registered. Callbacks never take
         # it, so holding it while a delete waits for them cannot deadlock.
         self._teardown_lock = threading.Lock()
+
+        with _identity_lock:
+            self._client.open()
 
     def shutdown(self, *args, **kwargs):
         """Shutdown ADS connection."""
@@ -62,14 +142,39 @@ class AdsHub:
             except pyads.ADSError as err:
                 _LOGGER.error(err)
 
-    def register_device(self, device):
+        # Entities hold this hub directly and stop hearing from the PLC now.
+        for device in self.devices:
+            device.mark_unavailable()
+
+    @property
+    def devices(self) -> list[AdsEntity]:
+        """Return the entities registered with this hub."""
+        with self._devices_lock:
+            return list(self._devices)
+
+    def register_device(self, device: AdsEntity) -> None:
         """Register a new device."""
-        self._devices.append(device)
+        with self._devices_lock:
+            self._devices.append(device)
+
+    def unregister_device(self, device: AdsEntity) -> None:
+        """Unregister a device."""
+        with self._devices_lock:
+            self._devices.remove(device)
+
+    def read_state(self) -> tuple[int, int]:
+        """Read the device state, raising if the device does not answer."""
+        with _identity_lock, self._lock:
+            state = self._client.read_state()
+        if state is None:
+            # pyads returns None instead of raising when the port is closed.
+            raise pyads.ADSError(err_code=1864)
+        return state
 
     def write_by_name(self, name, value, plc_datatype):
         """Write a value to the device."""
 
-        with self._lock:
+        with _identity_lock, self._lock:
             # The lock is released again before the client is closed, so I/O
             # started after shutdown began would race the teardown.
             if self._closed:
@@ -83,7 +188,7 @@ class AdsHub:
     def read_by_name(self, name, plc_datatype):
         """Read a value from the device."""
 
-        with self._lock:
+        with _identity_lock, self._lock:
             if self._closed:
                 _LOGGER.debug("Not reading %s, the hub is shut down", name)
                 return None
@@ -97,7 +202,7 @@ class AdsHub:
 
         attr = pyads.NotificationAttrib(ctypes.sizeof(plc_datatype))
 
-        with self._lock:
+        with _identity_lock, self._lock:
             if self._closed:
                 _LOGGER.debug("Not subscribing to %s, the hub is shut down", name)
                 return None
@@ -195,3 +300,39 @@ class AdsHub:
             _LOGGER.warning("No callback available for this datatype")
 
         notification_item.callback(notification_item.name, value)
+
+
+def connect(
+    device: str, port: int, ip_address: str | None, local_net_id: str | None
+) -> AdsHub:
+    """Connect to the ADS device and verify it responds."""
+    # Held across the whole handshake, so a config flow probe cannot swap the
+    # local AMS NetID out from under the port open or the state read.
+    with _identity_lock:
+        apply_local_net_id(local_net_id)
+        hub: AdsHub | None = None
+        try:
+            hub = AdsHub(pyads.Connection(device, port, ip_address))
+            hub.read_state()
+        except pyads.ADSError, RuntimeError:
+            if hub is not None:
+                # Nothing is subscribed yet, so this cannot wait on a callback.
+                hub.shutdown()
+            if local_net_id:
+                # A failed entry is never unloaded, so the override has to be
+                # undone here or it outlives the failed connection.
+                apply_local_net_id(None)
+            raise
+        return hub
+
+
+type AdsConfigEntry = ConfigEntry[AdsHub]
+
+
+@callback
+def async_get_hub(hass: HomeAssistant) -> AdsHub:
+    """Return the hub of the loaded ADS config entry."""
+    entries: list[AdsConfigEntry] = hass.config_entries.async_loaded_entries(DOMAIN)
+    if not entries:
+        raise PlatformNotReady("The ADS connection is not set up")
+    return entries[0].runtime_data
