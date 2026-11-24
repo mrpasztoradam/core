@@ -108,7 +108,8 @@ class AdsHub:
         self._lock = threading.Lock()
         # Held across a notification delete, so shutdown cannot close the
         # client while a dispatcher is still registered. Callbacks never take
-        # it, so holding it while a delete waits for them cannot deadlock.
+        # it or the identity lock, so holding either while a delete waits for
+        # them cannot deadlock.
         self._teardown_lock = threading.Lock()
 
         with _identity_lock:
@@ -118,7 +119,9 @@ class AdsHub:
         """Shutdown ADS connection."""
 
         _LOGGER.debug("Shutting down ADS")
-        with self._teardown_lock:
+        # A config flow probe swaps the process-wide local AMS NetID, and the
+        # deletes and the close have to go out under this connection's own.
+        with _identity_lock, self._teardown_lock:
             with self._lock:
                 self._closed = True
                 notification_items = list(self._notification_items.values())
@@ -229,7 +232,8 @@ class AdsHub:
     def delete_device_notification(self, hnotify: int) -> None:
         """Delete a single device notification."""
 
-        with self._teardown_lock:
+        # Taken before the teardown lock, in the same order as shutdown().
+        with _identity_lock, self._teardown_lock:
             with self._lock:
                 notification_item = self._notification_items.pop(hnotify, None)
             if notification_item is None:

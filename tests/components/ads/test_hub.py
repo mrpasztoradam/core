@@ -1,5 +1,6 @@
 """Test the ADS hub's local AMS NetID handling and connection helpers."""
 
+from collections.abc import Callable
 import threading
 from unittest.mock import MagicMock
 
@@ -96,6 +97,41 @@ def test_probe_blocks_hub_io(mock_pyads_local_net_id: MockPyadsLocalNetId) -> No
 
     reader.join()
     client.read_by_name.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "teardown",
+    [
+        pytest.param(lambda hub: hub.shutdown(), id="shutdown"),
+        pytest.param(lambda hub: hub.delete_device_notification(1), id="removal"),
+    ],
+)
+def test_probe_blocks_teardown(
+    mock_pyads_local_net_id: MockPyadsLocalNetId,
+    teardown: Callable[[AdsHub], None],
+) -> None:
+    """Test notifications are not deleted while a probe has another NetID active."""
+    client = MagicMock()
+    client.add_device_notification.return_value = (1, 1)
+    hub = AdsHub(client)
+    hub.add_device_notification("GVL.setpoint", pyads.PLCTYPE_INT, MagicMock())
+    tearing_down = threading.Event()
+
+    def _teardown() -> None:
+        tearing_down.set()
+        teardown(hub)
+
+    worker = threading.Thread(target=_teardown)
+    with local_net_id_probe(LOCAL_NET_ID):
+        worker.start()
+        tearing_down.wait()
+        worker.join(timeout=0.1)
+
+        assert worker.is_alive()
+        client.del_device_notification.assert_not_called()
+
+    worker.join()
+    client.del_device_notification.assert_called_once_with(1, 1)
 
 
 @pytest.mark.parametrize(
