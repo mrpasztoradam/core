@@ -81,6 +81,7 @@ CONF_ENTITY_CATEGORY = "entity_category"
 CONF_MODEL = "model"
 CONF_ADS_VAR_BRIGHTNESS = "adsvar_brightness"
 CONF_OBJECT = "object"
+CONF_AREA = "area"
 
 # Symbol types the PLC reports for a variable a switch can write.
 BOOL_SYMBOL_TYPES = frozenset({"BOOL", "BIT"})

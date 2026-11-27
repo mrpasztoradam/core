@@ -402,7 +402,13 @@ async def _async_start_switch_flow(
     )
     assert result["type"] is FlowResultType.MENU
     assert result["step_id"] == "user"
-    assert result["menu_options"] == ["switch", "light", "tf8040_object", "bulk_import"]
+    assert result["menu_options"] == [
+        "discover",
+        "switch",
+        "light",
+        "tf8040_object",
+        "bulk_import",
+    ]
 
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], {"next_step_id": "switch"}

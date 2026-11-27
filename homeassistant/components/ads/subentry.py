@@ -20,6 +20,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import (
+    CONF_AREA,
     CONF_COMPONENTS,
     CONF_ENTITY_CATEGORY,
     CONF_MODEL,
@@ -62,6 +63,8 @@ def async_setup_subentry_entities(
                 identifiers={(DOMAIN, subentry_id)},
                 name=subentry.title,
                 model=subentry.data.get(CONF_MODEL),
+                # Discovered devices are placed in the room they are in.
+                suggested_area=subentry.data.get(CONF_AREA),
                 via_device_id=hub_device.id,
             )
             entities = [

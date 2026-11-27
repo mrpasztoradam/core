@@ -1,5 +1,6 @@
 """Config flow for the ADS integration."""
 
+import asyncio
 from collections.abc import Mapping
 from functools import partial
 import logging
@@ -30,12 +31,26 @@ from homeassistant.const import (
     Platform,
 )
 from homeassistant.core import callback
-from homeassistant.helpers.selector import TextSelector, TextSelectorConfig
+from homeassistant.helpers import (
+    area_registry as ar,
+    floor_registry as fr,
+    label_registry as lr,
+)
+from homeassistant.helpers.selector import (
+    BooleanSelector,
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
+)
 
 from .const import (
     BOOL_SYMBOL_TYPES,
     CONF_ADS_VAR,
     CONF_ADS_VAR_BRIGHTNESS,
+    CONF_AREA,
     CONF_COMPONENTS,
     CONF_OBJECT,
     DEFAULT_PORT,
@@ -43,6 +58,7 @@ from .const import (
     ELEMENTARY_SYMBOL_TYPES,
     SUBENTRY_TYPE_DEVICE,
 )
+from .discovery import Node, Plan, build_plan, default_floors, plan_subentries
 from .hub import AdsConfigEntry, check_reachable
 from .objects import UnsupportedObjectError, object_device
 
@@ -82,7 +98,7 @@ STEP_IMPORT_DATA_SCHEMA = probatio.Schema(
     {probatio.Required("devices"): TextSelector(TextSelectorConfig(multiline=True))}
 )
 
-DEVICE_MENU = ["switch", "light", "tf8040_object", "bulk_import"]
+DEVICE_MENU = ["discover", "switch", "light", "tf8040_object", "bulk_import"]
 # Platforms an imported entity can be of; each has UI entities.
 IMPORT_PLATFORMS = [
     Platform.BINARY_SENSOR,
@@ -264,6 +280,8 @@ class AdsDeviceSubentryFlow(ConfigSubentryFlow):
     _name: str
     _component_id: str
     _component: dict[str, Any]
+    _discover_task: asyncio.Task[list[Node]] | None = None
+    _root: Node
     # Shown by the step that asks to save the variable unchecked.
     _confirm_placeholders: dict[str, str]
 
@@ -291,6 +309,143 @@ class AdsDeviceSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Ask for the switch's name and variable."""
         return await self._async_step_platform(Platform.SWITCH, user_input)
+
+    async def async_step_discover(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Read the project tree from the PLC while showing progress."""
+        if self._discover_task is None:
+            entry: AdsConfigEntry = self._get_entry()
+            if entry.state is not ConfigEntryState.LOADED:
+                return self.async_abort(reason="discovery_not_loaded")
+            self._discover_task = self.hass.async_create_task(
+                self._async_discover(entry)
+            )
+        if not self._discover_task.done():
+            return self.async_show_progress(
+                step_id="discover",
+                progress_action="discover",
+                progress_task=self._discover_task,
+            )
+        try:
+            roots = self._discover_task.result()
+        except pyads.ADSError, OSError, RuntimeError:
+            _LOGGER.exception("Discovery failed")
+            return self.async_show_progress_done(next_step_id="discover_failed")
+        # The house is the root the project hangs from; stray roots are
+        # instances whose parent could not be read.
+        self._root = max(roots, key=lambda root: len(root.children))
+        return self.async_show_progress_done(next_step_id="discover_select")
+
+    async def _async_discover(self, entry: AdsConfigEntry) -> list[Node]:
+        """Read the project tree in the executor."""
+        return await self.hass.async_add_executor_job(entry.runtime_data.discover)
+
+    async def async_step_discover_failed(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Tell that the project could not be read."""
+        return self.async_abort(reason="discovery_failed")
+
+    async def async_step_discover_select(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Choose the floors, then add the devices, floors and areas."""
+        root = self._root
+        candidates = [child for child in root.children if child.is_structural]
+        if user_input is not None:
+            floors = [c for c in candidates if c.path in user_input["floors"]]
+            plan = build_plan(root, floors)
+            return self._async_add_discovered(plan, user_input["create_areas"])
+
+        default = build_plan(root, default_floors(root))
+        schema = probatio.Schema(
+            {
+                probatio.Required(
+                    "floors", default=[f.path for f in default_floors(root)]
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(
+                                value=c.path, label=c.description or c.path
+                            )
+                            for c in candidates
+                        ],
+                        multiple=True,
+                        mode=SelectSelectorMode.LIST,
+                    )
+                ),
+                probatio.Required("create_areas", default=True): BooleanSelector(),
+            }
+        )
+        return self.async_show_form(
+            step_id="discover_select",
+            data_schema=schema,
+            description_placeholders={
+                "house": default.house,
+                "devices": str(len(default.devices)),
+                "entities": str(default.entity_count),
+                "rooms": str(sum(len(rooms) for rooms in default.floors.values())),
+                "other_areas": str(len(default.other_areas)),
+            },
+        )
+
+    @callback
+    def _async_add_discovered(
+        self, plan: Plan, create_areas: bool
+    ) -> SubentryFlowResult:
+        """Add a subentry per discovered device, and the floors and areas."""
+        entry = self._get_entry()
+        if create_areas:
+            floor_reg = fr.async_get(self.hass)
+            area_reg = ar.async_get(self.hass)
+            label_reg = lr.async_get(self.hass)
+            areas: list[tuple[str, str | None]] = [
+                (area, None) for area in plan.other_areas
+            ]
+            for floor_name, rooms in plan.floors.items():
+                floor = floor_reg.async_get_floor_by_name(
+                    floor_name
+                ) or floor_reg.async_create(floor_name)
+                areas.extend((room, floor.floor_id) for room in rooms)
+            for area_name, floor_id in areas:
+                area = area_reg.async_get_area_by_name(area_name)
+                if area is None:
+                    area = area_reg.async_create(area_name, floor_id=floor_id)
+                elif area.floor_id is None and floor_id is not None:
+                    area = area_reg.async_update(area.id, floor_id=floor_id)
+                label_ids = set()
+                for label_name in plan.area_labels.get(area_name, ()):
+                    label = label_reg.async_get_label_by_name(
+                        label_name
+                    ) or label_reg.async_create(label_name)
+                    label_ids.add(label.label_id)
+                if label_ids:
+                    area_reg.async_update(area.id, labels=area.labels | label_ids)
+        known = {subentry.unique_id for subentry in entry.subentries.values()}
+        added = 0
+        for unique_id, title, data in plan_subentries(plan):
+            if unique_id in known:
+                continue
+            if not create_areas:
+                data.pop(CONF_AREA, None)
+            self.hass.config_entries.async_add_subentry(
+                entry,
+                ConfigSubentry(
+                    subentry_type=SUBENTRY_TYPE_DEVICE,
+                    title=title,
+                    data=MappingProxyType(data),
+                    unique_id=unique_id,
+                ),
+            )
+            added += 1
+        return self.async_abort(
+            reason="discovery_successful",
+            description_placeholders={
+                "added": str(added),
+                "skipped": str(len(plan.devices) - added),
+            },
+        )
 
     async def async_step_light(
         self, user_input: dict[str, Any] | None = None

@@ -6,6 +6,7 @@ the present value and diagnostics of it. Writing through the priority array
 is left out; commandable objects are read only here.
 """
 
+from collections.abc import Iterable
 from typing import Any
 from uuid import uuid4
 
@@ -17,6 +18,7 @@ from homeassistant.const import (
     PERCENTAGE,
     Platform,
     UnitOfTemperature,
+    UnitOfTime,
 )
 
 from .const import (
@@ -51,58 +53,76 @@ COMMANDABLE = {11, 12, 16, 17, 21, 22}
 UNITS = {
     62: UnitOfTemperature.CELSIUS,
     64: UnitOfTemperature.FAHRENHEIT,
+    71: UnitOfTime.HOURS,
+    72: UnitOfTime.MINUTES,
+    73: UnitOfTime.SECONDS,
     98: PERCENTAGE,
 }
-UNIT_DEVICE_CLASSES = {62: "temperature", 64: "temperature"}
+UNIT_DEVICE_CLASSES = {
+    62: "temperature",
+    64: "temperature",
+    71: "duration",
+    72: "duration",
+    73: "duration",
+}
 
 
 class UnsupportedObjectError(Exception):
     """The object is not one a device can be made of."""
 
 
-def object_device(path: str, info: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """Return the title and subentry data of the device for an object."""
-    object_type = info["object_type"]
+def object_components(
+    path: str,
+    object_type: int,
+    unit: int | None,
+    members: Iterable[str],
+    *,
+    name: str | None = None,
+    device_class: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return the entities of an object: its present value and diagnostics.
+
+    The diagnostics are only added for members the object has; FB_BA_AV_Op
+    and the other _Op variants have no out-of-service flag or priorities.
+    """
     if object_type not in OBJECT_TYPES:
         raise UnsupportedObjectError(object_type)
-
-    components: list[dict[str, Any]] = []
+    members = set(members)
+    value: dict[str, Any]
     if object_type in BINARY:
-        components.append(
-            {
-                CONF_PLATFORM: Platform.BINARY_SENSOR,
-                CONF_ADS_VAR: f"{path}.bPresentValue",
-            }
-        )
+        value = {
+            CONF_PLATFORM: Platform.BINARY_SENSOR,
+            CONF_ADS_VAR: f"{path}.bPresentValue",
+        }
     elif object_type in ANALOG:
-        unit = info.get("unit")
-        value: dict[str, Any] = {
+        value = {
             CONF_PLATFORM: Platform.SENSOR,
             CONF_ADS_VAR: f"{path}.fPresentValue",
             CONF_ADS_TYPE: AdsType.REAL,
         }
         if unit in UNITS:
             value[CONF_UNIT_OF_MEASUREMENT] = UNITS[unit]
-        if unit in UNIT_DEVICE_CLASSES:
-            value[CONF_DEVICE_CLASS] = UNIT_DEVICE_CLASSES[unit]
-        components.append(value)
+        if unit is not None:
+            device_class = device_class or UNIT_DEVICE_CLASSES.get(unit)
     else:
         # Multistate present values are 1-based state numbers.
-        components.append(
-            {
-                CONF_PLATFORM: Platform.SENSOR,
-                CONF_ADS_VAR: f"{path}.nPresentValue",
-                CONF_ADS_TYPE: AdsType.UDINT,
-            }
-        )
-
-    members = info.get("members", set())
+        value = {
+            CONF_PLATFORM: Platform.SENSOR,
+            CONF_ADS_VAR: f"{path}.nPresentValue",
+            CONF_ADS_TYPE: AdsType.UDINT,
+        }
+    if name:
+        value[CONF_NAME] = name
+    if device_class:
+        value[CONF_DEVICE_CLASS] = device_class
+    components = [value]
+    prefix = f"{name} " if name else ""
     if "bEnOutOfService" in members:
         components.append(
             {
                 CONF_PLATFORM: Platform.BINARY_SENSOR,
                 CONF_ADS_VAR: f"{path}.bEnOutOfService",
-                CONF_NAME: "Out of service",
+                CONF_NAME: f"{prefix}out of service".capitalize(),
                 CONF_ENTITY_CATEGORY: "diagnostic",
             }
         )
@@ -113,11 +133,19 @@ def object_device(path: str, info: dict[str, Any]) -> tuple[str, dict[str, Any]]
                 CONF_PLATFORM: Platform.SENSOR,
                 CONF_ADS_VAR: f"{path}.eActivePrio",
                 CONF_ADS_TYPE: AdsType.USINT,
-                CONF_NAME: "Active priority",
+                CONF_NAME: f"{prefix}active priority".capitalize(),
                 CONF_ENTITY_CATEGORY: "diagnostic",
             }
         )
+    return components
 
+
+def object_device(path: str, info: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Return the title and subentry data of the device for an object."""
+    object_type = info["object_type"]
+    components = object_components(
+        path, object_type, info.get("unit"), info.get("members", set())
+    )
     title = info.get("description") or info.get("name") or path
     return title, {
         CONF_OBJECT: path,

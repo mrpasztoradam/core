@@ -17,6 +17,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import PlatformNotReady
 
 from .const import DATA_SETUP_DONE, DOMAIN
+from .discovery import Node, describe, find_instances, link, upload_datatypes
 
 if TYPE_CHECKING:
     from .entity import AdsEntity
@@ -170,6 +171,49 @@ class AdsHub:
             # pyads returns None instead of raising when the port is closed.
             raise pyads.ADSError(err_code=1864)
         return info
+
+    def discover(self) -> list[Node]:
+        """Read the TF8040 project tree from the device and return its roots.
+
+        The lock is taken per request, not for the whole discovery, so values
+        keep arriving for the entities meanwhile.
+        """
+        with self._lock:
+            if self._closed:
+                raise pyads.ADSError(err_code=1864)
+            types = upload_datatypes(self._client)
+            symbols = [
+                (
+                    symbol.name,
+                    symbol.symbol_type,
+                    symbol.index_group,
+                    symbol.index_offset,
+                )
+                for symbol in self._client.get_all_symbols()
+            ]
+        nodes = find_instances(types, symbols)
+
+        def read_raw(requests: list[tuple[int, int, int]]) -> bytes:
+            with self._lock:
+                if self._closed:
+                    raise pyads.ADSError(err_code=1864)
+                # pyads 3.4.0 only sum reads by name, looking up every symbol
+                # first; the addresses are already known from the type table.
+                return pyads.pyads_ex.adsSumReadBytes(
+                    self._client._port,  # noqa: SLF001
+                    self._client._adr,  # noqa: SLF001
+                    requests,
+                )
+
+        def read_reference(name: str) -> str | None:
+            with self._lock:
+                try:
+                    return self._client.read_by_name(name, pyads.PLCTYPE_STRING)
+                except pyads.ADSError:
+                    return None
+
+        describe(nodes, read_raw, read_reference)
+        return link(nodes)
 
     def read_device_info(self) -> tuple[str, str] | None:
         """Return the device name and version, or None if it does not answer."""

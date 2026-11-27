@@ -30,6 +30,9 @@
   "config_subentries": {
     "device": {
       "abort": {
+        "discovery_failed": "The project could not be read from the PLC. See the log for details.",
+        "discovery_not_loaded": "The ADS connection is not set up, so the PLC cannot be read.",
+        "discovery_successful": "Added {added} devices. {skipped} were discovered before and left as they are.",
         "import_successful": "Added {count} devices.",
         "reconfigure_not_supported": "Devices with several entities cannot be changed in this proof of concept. Delete the device and add it again."
       },
@@ -46,6 +49,9 @@
       },
       "initiate_flow": {
         "user": "Add device"
+      },
+      "progress": {
+        "discover": "Reading the project from the PLC. This takes a few seconds."
       },
       "step": {
         "bulk_import": {
@@ -73,6 +79,18 @@
         "confirm_unknown_type": {
           "description": "`{adsvar}` is of type `{type}`, which could not be confirmed as a `BOOL`. Save it anyway if the type is an alias of `BOOL`.",
           "title": "[%key:component::ads::config_subentries::device::step::confirm_not_loaded::title%]"
+        },
+        "discover_select": {
+          "data": {
+            "create_areas": "Create floors and areas",
+            "floors": "Floors"
+          },
+          "data_description": {
+            "create_areas": "Create the floors and areas, and put each device in its room. Turn off to add the devices without an area.",
+            "floors": "Views of the house that are floors. The others' devices are put in an area per building system."
+          },
+          "description": "The PLC's project has {devices} devices with {entities} entities, in {rooms} rooms and {other_areas} building systems with the floors below.\n\nChoose which of the house's views are floors. Each floor's rooms become areas on it; views between a floor and its rooms become labels on the rooms. The building systems, such as heating, get an area each.\n\nDevices that were discovered before are left as they are.",
+          "title": "Discovered: {house}"
         },
         "light": {
           "data": {
@@ -113,9 +131,10 @@
           "title": "TF8040 object"
         },
         "user": {
-          "description": "Choose what to add: a single entity, a TF8040 object, or many devices at once.",
+          "description": "Discover the devices of a TF8040 project, or add a single entity, a TF8040 object, or many devices at once.",
           "menu_options": {
             "bulk_import": "Import devices",
+            "discover": "Discover from the PLC",
             "light": "Dimmable light",
             "switch": "Switch",
             "tf8040_object": "TF8040 object"
