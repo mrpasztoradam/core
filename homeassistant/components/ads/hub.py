@@ -8,7 +8,7 @@ import logging
 import socket
 import struct
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pyads
 
@@ -131,6 +131,45 @@ class AdsHub:
                 raise pyads.ADSError(err_code=1864)
             # Unlike most pyads calls, this raises on a closed port.
             return self._client.get_symbol(name).symbol_type
+
+    def read_object_info(self, path: str) -> dict[str, Any]:
+        """Read what describes a TF8040 object: its type, name and unit.
+
+        Raises pyads.ADSError when the device has no such object, or when it is
+        shut down (1864).
+        """
+        with self._lock:
+            if self._closed:
+                raise pyads.ADSError(err_code=1864)
+            info: dict[str, Any] = {
+                "object_type": self._client.read_by_name(
+                    f"{path}.eObjectType", pyads.PLCTYPE_BYTE
+                ),
+                "name": self._client.read_by_name(
+                    f"{path}.sObjectName", pyads.PLCTYPE_STRING
+                ),
+                "description": self._client.read_by_name(
+                    f"{path}.sDescription", pyads.PLCTYPE_STRING
+                ),
+            }
+            # Object types differ in their members: FB_BA_AV_Op has no
+            # out-of-service flag, and inputs have no priority array.
+            info["members"] = set()
+            for member in ("bEnOutOfService", "eActivePrio"):
+                try:
+                    self._client.get_symbol(f"{path}.{member}")
+                except pyads.ADSError:
+                    continue
+                info["members"].add(member)
+            if info["object_type"] in (10, 11, 12):
+                # Only analog objects have a unit.
+                info["unit"] = self._client.read_by_name(
+                    f"{path}.eUnit", pyads.PLCTYPE_UINT
+                )
+        if info["object_type"] is None:
+            # pyads returns None instead of raising when the port is closed.
+            raise pyads.ADSError(err_code=1864)
+        return info
 
     def read_device_info(self) -> tuple[str, str] | None:
         """Return the device name and version, or None if it does not answer."""

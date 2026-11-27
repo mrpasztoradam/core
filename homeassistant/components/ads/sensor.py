@@ -1,6 +1,7 @@
 """Support for ADS sensors."""
 
-from typing import override
+from collections.abc import Mapping
+from typing import Any, override
 
 import probatio
 
@@ -13,10 +14,18 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.const import CONF_DEVICE_CLASS, CONF_NAME, CONF_UNIT_OF_MEASUREMENT
+from homeassistant.const import (
+    CONF_DEVICE_CLASS,
+    CONF_NAME,
+    CONF_UNIT_OF_MEASUREMENT,
+    Platform,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import (
+    AddConfigEntryEntitiesCallback,
+    AddEntitiesCallback,
+)
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType, StateType
 
 from .const import (
@@ -28,7 +37,8 @@ from .const import (
     AdsType,
 )
 from .entity import AdsEntity
-from .hub import AdsHub, async_wait_for_hub
+from .hub import AdsConfigEntry, AdsHub, async_wait_for_hub
+from .subentry import async_setup_subentry_entities
 
 DEFAULT_NAME = "ADS sensor"
 
@@ -94,6 +104,34 @@ async def async_setup_platform(
     async_add_entities([entity])
 
 
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: AdsConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the sensors of the devices added in the UI."""
+
+    def _create(
+        hub: AdsHub, component: Mapping[str, Any], kwargs: dict[str, Any]
+    ) -> AdsSensor:
+        device_class = component.get(CONF_DEVICE_CLASS)
+        return AdsSensor(
+            hub,
+            component[CONF_ADS_VAR],
+            AdsType(component.get(CONF_ADS_TYPE, AdsType.REAL)),
+            "",
+            None,
+            SensorDeviceClass(device_class) if device_class else None,
+            SensorStateClass.MEASUREMENT if device_class else None,
+            component.get(CONF_UNIT_OF_MEASUREMENT),
+            **kwargs,
+        )
+
+    async_setup_subentry_entities(
+        hass, entry, async_add_entities, Platform.SENSOR, _create
+    )
+
+
 class AdsSensor(AdsEntity, SensorEntity):
     """Representation of an ADS sensor entity."""
 
@@ -107,9 +145,10 @@ class AdsSensor(AdsEntity, SensorEntity):
         device_class: SensorDeviceClass | None,
         state_class: SensorStateClass | None,
         unit_of_measurement: str | None,
+        **entity_kwargs: Any,
     ) -> None:
         """Initialize AdsSensor entity."""
-        super().__init__(ads_hub, name, ads_var)
+        super().__init__(ads_hub, name, ads_var, **entity_kwargs)
         self._ads_type = ads_type
         self._factor = factor
         self._attr_device_class = device_class

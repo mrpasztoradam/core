@@ -3,11 +3,13 @@
 from collections.abc import Mapping
 from functools import partial
 import logging
+from types import MappingProxyType
 from typing import Any, override
 from uuid import uuid4
 
 import probatio
 import pyads
+import yaml
 
 from homeassistant.config_entries import (
     SOURCE_RECONFIGURE,
@@ -15,6 +17,7 @@ from homeassistant.config_entries import (
     ConfigEntryState,
     ConfigFlow,
     ConfigFlowResult,
+    ConfigSubentry,
     ConfigSubentryFlow,
     SubentryFlowResult,
 )
@@ -27,19 +30,21 @@ from homeassistant.const import (
     Platform,
 )
 from homeassistant.core import callback
-from homeassistant.helpers.selector import TextSelector
+from homeassistant.helpers.selector import TextSelector, TextSelectorConfig
 
 from .const import (
     BOOL_SYMBOL_TYPES,
     CONF_ADS_VAR,
+    CONF_ADS_VAR_BRIGHTNESS,
     CONF_COMPONENTS,
+    CONF_OBJECT,
     DEFAULT_PORT,
     DOMAIN,
     ELEMENTARY_SYMBOL_TYPES,
-    SUBENTRY_PLATFORMS,
     SUBENTRY_TYPE_DEVICE,
 )
 from .hub import AdsConfigEntry, check_reachable
+from .objects import UnsupportedObjectError, object_device
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,6 +65,31 @@ STEP_ENTITY_DATA_SCHEMA = probatio.Schema(
         probatio.Required(CONF_ADS_VAR): TextSelector(),
     }
 )
+
+STEP_LIGHT_DATA_SCHEMA = STEP_ENTITY_DATA_SCHEMA.extend(
+    {probatio.Optional(CONF_ADS_VAR_BRIGHTNESS): TextSelector()}
+)
+
+STEP_OBJECT_DATA_SCHEMA = probatio.Schema(
+    {
+        probatio.Required(CONF_OBJECT): TextSelector(),
+        # pylint: disable-next=home-assistant-config-flow-name-field
+        probatio.Optional(CONF_NAME): TextSelector(),
+    }
+)
+
+STEP_IMPORT_DATA_SCHEMA = probatio.Schema(
+    {probatio.Required("devices"): TextSelector(TextSelectorConfig(multiline=True))}
+)
+
+DEVICE_MENU = ["switch", "light", "tf8040_object", "bulk_import"]
+# Platforms an imported entity can be of; each has UI entities.
+IMPORT_PLATFORMS = [
+    Platform.BINARY_SENSOR,
+    Platform.LIGHT,
+    Platform.SENSOR,
+    Platform.SWITCH,
+]
 
 # ADS error code for a variable the device does not know.
 ADS_ERROR_SYMBOL_NOT_FOUND = 1808
@@ -242,17 +272,18 @@ class AdsDeviceSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Ask what kind of entity the device has."""
         self._component_id = uuid4().hex
-        return self.async_show_menu(step_id="user", menu_options=SUBENTRY_PLATFORMS)
+        return self.async_show_menu(step_id="user", menu_options=DEVICE_MENU)
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Change the device's entity."""
         subentry = self._get_reconfigure_subentry()
-        # Every device has a single entity so far.
-        self._component_id, component = next(
-            iter(subentry.data[CONF_COMPONENTS].items())
-        )
+        components = subentry.data[CONF_COMPONENTS]
+        if CONF_OBJECT in subentry.data or len(components) != 1:
+            # Proof of concept: devices of several entities are not edited.
+            return self.async_abort(reason="reconfigure_not_supported")
+        self._component_id, component = next(iter(components.items()))
         return await self._async_step_platform(component[CONF_PLATFORM], None)
 
     async def async_step_switch(
@@ -260,6 +291,139 @@ class AdsDeviceSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Ask for the switch's name and variable."""
         return await self._async_step_platform(Platform.SWITCH, user_input)
+
+    async def async_step_light(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Ask for the light's name, on/off and brightness variables."""
+        return await self._async_step_platform(Platform.LIGHT, user_input)
+
+    async def async_step_tf8040_object(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Make a device of a TF8040 object, with an entity per member of use."""
+        errors: dict[str, str] = {}
+        placeholders: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                title, data = await self._async_object_device(user_input[CONF_OBJECT])
+            except _ImportError as err:
+                errors[CONF_OBJECT] = err.key
+                placeholders["detail"] = err.detail
+            else:
+                return self.async_create_entry(
+                    title=user_input.get(CONF_NAME) or title, data=data
+                )
+        return self.async_show_form(
+            step_id="tf8040_object",
+            data_schema=self.add_suggested_values_to_schema(
+                STEP_OBJECT_DATA_SCHEMA, user_input
+            ),
+            errors=errors,
+            description_placeholders=placeholders,
+        )
+
+    async def async_step_bulk_import(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Add many devices at once from YAML: entities, devices and objects."""
+        errors: dict[str, str] = {}
+        placeholders: dict[str, str] = {"detail": ""}
+        if user_input is not None:
+            try:
+                devices = await self._async_parse_import(user_input["devices"])
+            except _ImportError as err:
+                errors["devices"] = err.key
+                placeholders["detail"] = err.detail
+            else:
+                entry = self._get_entry()
+                for title, data in devices:
+                    self.hass.config_entries.async_add_subentry(
+                        entry,
+                        ConfigSubentry(
+                            subentry_type=SUBENTRY_TYPE_DEVICE,
+                            title=title,
+                            data=MappingProxyType(data),
+                            unique_id=None,
+                        ),
+                    )
+                return self.async_abort(
+                    reason="import_successful",
+                    description_placeholders={"count": str(len(devices))},
+                )
+        return self.async_show_form(
+            step_id="bulk_import",
+            data_schema=self.add_suggested_values_to_schema(
+                STEP_IMPORT_DATA_SCHEMA, user_input
+            ),
+            errors=errors,
+            description_placeholders=placeholders,
+        )
+
+    async def _async_object_device(self, path: str) -> tuple[str, dict[str, Any]]:
+        """Read a TF8040 object from the PLC and return its device."""
+        entry: AdsConfigEntry = self._get_entry()
+        if entry.state is not ConfigEntryState.LOADED:
+            raise _ImportError("not_loaded", path)
+        try:
+            info = await self.hass.async_add_executor_job(
+                entry.runtime_data.read_object_info, path
+            )
+        except pyads.ADSError as err:
+            if err.err_code == ADS_ERROR_SYMBOL_NOT_FOUND:
+                raise _ImportError("object_not_found", path) from err
+            raise _ImportError("cannot_read", f"{path}: {err}") from err
+        try:
+            return object_device(path, info)
+        except UnsupportedObjectError as err:
+            raise _ImportError(
+                "unsupported_object", f"{path} (type {info['object_type']})"
+            ) from err
+
+    async def _async_parse_import(self, text: str) -> list[tuple[str, dict[str, Any]]]:
+        """Turn the import YAML into the title and data of each device."""
+        try:
+            items = yaml.safe_load(text)
+        except yaml.YAMLError as err:
+            raise _ImportError("invalid_yaml", str(err).splitlines()[0]) from err
+        if not isinstance(items, list) or not items:
+            raise _ImportError("invalid_yaml", "a list of devices is expected")
+        devices = []
+        for index, item in enumerate(items, 1):
+            if not isinstance(item, dict):
+                raise _ImportError("invalid_device", f"item {index}")
+            if CONF_OBJECT in item:
+                title, data = await self._async_object_device(str(item[CONF_OBJECT]))
+                devices.append((item.get(CONF_NAME) or title, data))
+                continue
+            if not item.get(CONF_NAME):
+                raise _ImportError("invalid_device", f"item {index} has no name")
+            # A single entity can be given inline instead of as a list.
+            components = item.get(CONF_COMPONENTS) or [
+                {k: v for k, v in item.items() if k != CONF_NAME}
+            ]
+            for component in components:
+                if (
+                    not isinstance(component, dict)
+                    or component.get(CONF_PLATFORM) not in IMPORT_PLATFORMS
+                    or not component.get(CONF_ADS_VAR)
+                ):
+                    raise _ImportError(
+                        "invalid_device",
+                        f"item {index} ({item[CONF_NAME]}): every entity needs a "
+                        f"platform ({', '.join(IMPORT_PLATFORMS)}) and an adsvar",
+                    )
+            devices.append(
+                (
+                    str(item[CONF_NAME]),
+                    {
+                        CONF_COMPONENTS: {
+                            uuid4().hex: dict(component) for component in components
+                        }
+                    },
+                )
+            )
+        return devices
 
     async def _async_step_platform(
         self, platform: Platform, user_input: dict[str, Any] | None
@@ -274,6 +438,8 @@ class AdsDeviceSubentryFlow(ConfigSubentryFlow):
                 CONF_PLATFORM: platform,
                 CONF_ADS_VAR: user_input[CONF_ADS_VAR],
             }
+            if brightness := user_input.get(CONF_ADS_VAR_BRIGHTNESS):
+                self._component[CONF_ADS_VAR_BRIGHTNESS] = brightness
             self._confirm_placeholders = {"adsvar": user_input[CONF_ADS_VAR]}
             try:
                 unverified_step = await self._async_check_variable(
@@ -294,15 +460,15 @@ class AdsDeviceSubentryFlow(ConfigSubentryFlow):
         if suggested_values is None and self.source == SOURCE_RECONFIGURE:
             subentry = self._get_reconfigure_subentry()
             component = subentry.data[CONF_COMPONENTS][self._component_id]
-            suggested_values = {
-                CONF_NAME: subentry.title,
-                CONF_ADS_VAR: component[CONF_ADS_VAR],
-            }
+            suggested_values = {CONF_NAME: subentry.title, **component}
 
         return self.async_show_form(
             step_id=platform,
             data_schema=self.add_suggested_values_to_schema(
-                STEP_ENTITY_DATA_SCHEMA, suggested_values
+                STEP_LIGHT_DATA_SCHEMA
+                if platform == Platform.LIGHT
+                else STEP_ENTITY_DATA_SCHEMA,
+                suggested_values,
             ),
             errors=errors,
             description_placeholders=placeholders,
@@ -392,3 +558,12 @@ class _WrongTypeError(Exception):
     def __init__(self, symbol_type: str) -> None:
         super().__init__(symbol_type)
         self.symbol_type = symbol_type
+
+
+class _ImportError(Exception):
+    """A device to add could not be made; key names the error text."""
+
+    def __init__(self, key: str, detail: str) -> None:
+        super().__init__(detail)
+        self.key = key
+        self.detail = detail

@@ -1,6 +1,7 @@
 """Support for ADS binary sensors."""
 
-from typing import override
+from collections.abc import Mapping
+from typing import Any, override
 
 import probatio
 import pyads
@@ -11,15 +12,19 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
-from homeassistant.const import CONF_DEVICE_CLASS, CONF_NAME
+from homeassistant.const import CONF_DEVICE_CLASS, CONF_NAME, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import (
+    AddConfigEntryEntitiesCallback,
+    AddEntitiesCallback,
+)
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 from .const import CONF_ADS_VAR, STATE_KEY_STATE
 from .entity import AdsEntity
-from .hub import AdsHub, async_wait_for_hub
+from .hub import AdsConfigEntry, AdsHub, async_wait_for_hub
+from .subentry import async_setup_subentry_entities
 
 DEFAULT_NAME = "ADS binary sensor"
 PLATFORM_SCHEMA = BINARY_SENSOR_PLATFORM_SCHEMA.extend(
@@ -48,6 +53,29 @@ async def async_setup_platform(
     async_add_entities([ads_sensor])
 
 
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: AdsConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the binary sensors of the devices added in the UI."""
+
+    def _create(
+        hub: AdsHub, component: Mapping[str, Any], kwargs: dict[str, Any]
+    ) -> AdsBinarySensor:
+        sensor = AdsBinarySensor(hub, "", component[CONF_ADS_VAR], None, **kwargs)
+        # Unlike in YAML, no device class means none, not moving.
+        device_class = component.get(CONF_DEVICE_CLASS)
+        sensor._attr_device_class = (  # noqa: SLF001
+            BinarySensorDeviceClass(device_class) if device_class else None
+        )
+        return sensor
+
+    async_setup_subentry_entities(
+        hass, entry, async_add_entities, Platform.BINARY_SENSOR, _create
+    )
+
+
 class AdsBinarySensor(AdsEntity, BinarySensorEntity):
     """Representation of ADS binary sensors."""
 
@@ -57,9 +85,10 @@ class AdsBinarySensor(AdsEntity, BinarySensorEntity):
         name: str,
         ads_var: str,
         device_class: BinarySensorDeviceClass | None,
+        **entity_kwargs: Any,
     ) -> None:
         """Initialize ADS binary sensor."""
-        super().__init__(ads_hub, name, ads_var)
+        super().__init__(ads_hub, name, ads_var, **entity_kwargs)
         self._attr_device_class = device_class or BinarySensorDeviceClass.MOVING
 
     @override

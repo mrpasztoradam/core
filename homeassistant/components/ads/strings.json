@@ -29,15 +29,35 @@
   },
   "config_subentries": {
     "device": {
+      "abort": {
+        "import_successful": "Added {count} devices.",
+        "reconfigure_not_supported": "Devices with several entities cannot be changed in this proof of concept. Delete the device and add it again."
+      },
       "entry_type": "Device",
       "error": {
+        "cannot_read": "The object could not be read: {detail}",
+        "invalid_device": "A device is not valid: {detail}",
+        "invalid_yaml": "The YAML could not be read: {detail}",
+        "not_loaded": "The ADS connection is not set up, so `{detail}` cannot be read.",
+        "object_not_found": "The PLC has no object `{detail}`.",
         "unknown": "[%key:common::config_flow::error::unknown%]",
+        "unsupported_object": "The object `{detail}` is not a supported input, output or value object.",
         "wrong_type": "The variable is of type `{type}`. A switch needs a `BOOL` variable."
       },
       "initiate_flow": {
         "user": "Add device"
       },
       "step": {
+        "bulk_import": {
+          "data": {
+            "devices": "Devices"
+          },
+          "data_description": {
+            "devices": "Entities are of platform `switch`, `light`, `binary_sensor` or `sensor`."
+          },
+          "description": "Paste a YAML list of devices. Each item is one device: a single entity, a device with several `components`, or a TF8040 `object`.\n\n```yaml\n- name: Socket\n  platform: switch\n  adsvar: HA.Living.bSocket1\n- name: Living room\n  components:\n    - platform: light\n      name: Ceiling\n      adsvar: HA.Living.stCeilLed.bOn\n      adsvar_brightness: HA.Living.stCeilLed.nBrightness\n    - platform: binary_sensor\n      name: Window\n      adsvar: HA.Living.bWindow1\n      device_class: window\n- object: MAIN.FSZ.Living.Presence\n```{detail}",
+          "title": "Import devices"
+        },
         "confirm_cannot_connect": {
           "description": "`{adsvar}` could not be checked, because the PLC did not answer: {error}\n\nSaving it anyway adds a device whose entity stays unavailable until the variable exists and the ADS integration is reloaded.",
           "title": "[%key:component::ads::config_subentries::device::step::confirm_not_loaded::title%]"
@@ -54,6 +74,20 @@
           "description": "`{adsvar}` is of type `{type}`, which could not be confirmed as a `BOOL`. Save it anyway if the type is an alias of `BOOL`.",
           "title": "[%key:component::ads::config_subentries::device::step::confirm_not_loaded::title%]"
         },
+        "light": {
+          "data": {
+            "adsvar": "On/off variable",
+            "adsvar_brightness": "Brightness variable",
+            "name": "[%key:common::config_flow::data::name%]"
+          },
+          "data_description": {
+            "adsvar": "A `BOOL` variable, for example `HA.Living.stCeilLed.bOn`.",
+            "adsvar_brightness": "An optional `UINT` variable from 0 to 255, for example `HA.Living.stCeilLed.nBrightness`.",
+            "name": "The name of the device and its light."
+          },
+          "description": "Add a device with a light, switched by a `BOOL` variable and optionally dimmed by a brightness variable from 0 to 255.",
+          "title": "Dimmable light"
+        },
         "switch": {
           "data": {
             "adsvar": "PLC variable",
@@ -66,10 +100,25 @@
           "description": "Add a device with a switch for a `BOOL` variable on the PLC.",
           "title": "Switch"
         },
+        "tf8040_object": {
+          "data": {
+            "name": "[%key:common::config_flow::data::name%]",
+            "object": "Object path"
+          },
+          "data_description": {
+            "name": "Optional. Defaults to the object's description or name on the PLC.",
+            "object": "The path of the object instance, for example `MAIN.FSZ.Living.Presence`."
+          },
+          "description": "Add a device for a TF8040 object. Its present value becomes the main entity, with its out-of-service state and, for commandable objects, its active priority as diagnostic entities.",
+          "title": "TF8040 object"
+        },
         "user": {
-          "description": "Choose the kind of entity the device has.",
+          "description": "Choose what to add: a single entity, a TF8040 object, or many devices at once.",
           "menu_options": {
-            "switch": "Switch"
+            "bulk_import": "Import devices",
+            "light": "Dimmable light",
+            "switch": "Switch",
+            "tf8040_object": "TF8040 object"
           },
           "title": "Add device"
         }
