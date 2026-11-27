@@ -44,6 +44,7 @@ from .const import (
     CONF_ADS_VAR,
     CONF_AREA,
     CONF_COMPONENTS,
+    CONF_INTERFACE,
     CONF_MODEL,
     CONF_OBJECT,
     DEFAULT_PORT,
@@ -312,6 +313,7 @@ class AdsDeviceSubentryFlow(ConfigSubentryFlow):
                         uuid4().hex: {
                             CONF_PLATFORM: INTERFACES[obj.interface],
                             CONF_OBJECT: obj.path,
+                            CONF_INTERFACE: obj.interface,
                         }
                     },
                 }

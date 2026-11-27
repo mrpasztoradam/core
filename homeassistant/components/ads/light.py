@@ -10,6 +10,7 @@ import pyads
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
+    ATTR_RGBW_COLOR,
     DEFAULT_MAX_KELVIN,
     DEFAULT_MIN_KELVIN,
     PLATFORM_SCHEMA as LIGHT_PLATFORM_SCHEMA,
@@ -26,7 +27,7 @@ from homeassistant.helpers.entity_platform import (
 )
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
-from .const import CONF_ADS_VAR, CONF_OBJECT, STATE_KEY_STATE
+from .const import CONF_ADS_VAR, CONF_INTERFACE, CONF_OBJECT, STATE_KEY_STATE
 from .entity import AdsEntity
 from .hub import AdsConfigEntry, AdsHub, async_wait_for_hub
 from .subentry import async_setup_subentry_entities
@@ -93,6 +94,8 @@ async def async_setup_entry(
         hub: AdsHub, component: Mapping[str, Any], kwargs: dict[str, Any]
     ) -> AdsEntity:
         if CONF_OBJECT in component:
+            if component.get(CONF_INTERFACE) == "I_HA_RgbwLight":
+                return AdsObjectRgbwLight(hub, component[CONF_OBJECT], **kwargs)
             return AdsObjectLight(hub, component[CONF_OBJECT], **kwargs)
         return AdsLight(
             hub,
@@ -263,3 +266,91 @@ class AdsObjectLight(AdsEntity, LightEntity):
     def turn_off(self, **kwargs: Any) -> None:
         """Turn the light off."""
         self._ads_hub.call_method(self._ads_var, "TurnOff", b"", return_size=1)
+
+
+STATE_KEY_COLOR = "color"
+STATE_KEY_COLOR_TEMP = "color_temp"
+STATE_KEY_MODE = "mode"
+# I_HA_RgbwLight.Mode
+MODE_COLOR_TEMP = 2
+
+
+class AdsObjectRgbwLight(AdsObjectLight):
+    """An RGBW light object of the PLC program (I_HA_RgbwLight).
+
+    The colour is one packed property (16#WWBBGGRR), so a colour change
+    arrives in one notification; colour and level are set in one call.
+    """
+
+    _attr_supported_color_modes = {ColorMode.RGBW, ColorMode.COLOR_TEMP}
+    _attr_min_color_temp_kelvin = 2000
+    _attr_max_color_temp_kelvin = 6500
+
+    def __init__(self, ads_hub: AdsHub, path: str, **entity_kwargs: Any) -> None:
+        """Initialize the RGBW light object."""
+        super().__init__(ads_hub, path, **entity_kwargs)
+        self._state_dict[STATE_KEY_COLOR] = None
+        self._state_dict[STATE_KEY_COLOR_TEMP] = None
+        self._state_dict[STATE_KEY_MODE] = None
+
+    @override
+    async def async_subscribe(self) -> None:
+        """Follow the object's properties."""
+        await super().async_subscribe()
+        await self.async_initialize_device(
+            f"{self._ads_var}.Color", pyads.PLCTYPE_UDINT, STATE_KEY_COLOR
+        )
+        await self.async_initialize_device(
+            f"{self._ads_var}.ColorTemp", pyads.PLCTYPE_UINT, STATE_KEY_COLOR_TEMP
+        )
+        await self.async_initialize_device(
+            f"{self._ads_var}.Mode", pyads.PLCTYPE_USINT, STATE_KEY_MODE
+        )
+
+    @property
+    @override
+    def color_mode(self) -> ColorMode:
+        """Return whether the light shows a colour or a white temperature."""
+        if self._state_dict[STATE_KEY_MODE] == MODE_COLOR_TEMP:
+            return ColorMode.COLOR_TEMP
+        return ColorMode.RGBW
+
+    @property
+    @override
+    def rgbw_color(self) -> tuple[int, int, int, int] | None:
+        """Return the actual colour."""
+        if (packed := self._state_dict[STATE_KEY_COLOR]) is None:
+            return None
+        return (
+            packed & 0xFF,
+            packed >> 8 & 0xFF,
+            packed >> 16 & 0xFF,
+            packed >> 24 & 0xFF,
+        )
+
+    @property
+    @override
+    def color_temp_kelvin(self) -> int | None:
+        """Return the actual white temperature, if in that mode."""
+        return self._state_dict[STATE_KEY_COLOR_TEMP] or None
+
+    @override
+    def turn_on(self, **kwargs: Any) -> None:
+        """Turn on, setting the colour or white temperature with the level."""
+        brightness = kwargs.get(ATTR_BRIGHTNESS, 0)
+        if (rgbw := kwargs.get(ATTR_RGBW_COLOR)) is not None:
+            self._ads_hub.call_method(
+                self._ads_var,
+                "SetColor",
+                struct.pack("<5B", *rgbw, brightness),
+                return_size=1,
+            )
+        elif (kelvin := kwargs.get(ATTR_COLOR_TEMP_KELVIN)) is not None:
+            self._ads_hub.call_method(
+                self._ads_var,
+                "SetColorTemp",
+                struct.pack("<HB", kelvin, brightness),
+                return_size=1,
+            )
+        else:
+            super().turn_on(**kwargs)

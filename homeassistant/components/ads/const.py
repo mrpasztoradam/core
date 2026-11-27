@@ -84,6 +84,7 @@ CONF_ENTITY_CATEGORY = "entity_category"
 CONF_MODEL = "model"
 CONF_AREA = "area"
 CONF_OBJECT = "object"
+CONF_INTERFACE = "interface"
 CONF_ADS_VAR_BRIGHTNESS = "adsvar_brightness"
 
 # Symbol types the PLC reports for a variable a switch can write.

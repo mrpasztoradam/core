@@ -35,8 +35,9 @@ from pyads.constants import (
 
 from homeassistant.const import Platform
 
-# The interfaces Home Assistant knows, and the platform of their entities.
-INTERFACES = {"I_HA_Light": Platform.LIGHT}
+# The interfaces Home Assistant knows, and the platform of their entities,
+# most specific first: an RGBW light object is a light object too.
+INTERFACES = {"I_HA_RgbwLight": Platform.LIGHT, "I_HA_Light": Platform.LIGHT}
 NAME_ATTRIBUTE = "ha.name"
 MAX_DEPTH = 10
 
@@ -127,16 +128,22 @@ def read_types(client: pyads.Connection) -> dict[str, dict[str, Any]]:
 
 
 def _interface_of(types: dict[str, dict[str, Any]], type_name: str) -> str | None:
-    """Return the known interface a type implements, directly or inherited."""
+    """Return the most specific known interface a type implements.
+
+    Interfaces are collected from the type and the types it extends; an
+    interface's own EXTENDS is not needed, as the FB declares the derived one.
+    """
+    implemented: set[str] = set()
     seen = set()
     while type_name in types and type_name not in seen:
         seen.add(type_name)
         attrs = types[type_name]["attrs"]
-        for implemented in attrs.get("TcImplements", "").split(";"):
-            if (interface := implemented.strip().rsplit(".", 1)[-1]) in INTERFACES:
-                return interface
+        implemented.update(
+            name.strip().rsplit(".", 1)[-1]
+            for name in attrs.get("TcImplements", "").split(";")
+        )
         type_name = attrs.get("TcExtends", "")
-    return None
+    return next((name for name in INTERFACES if name in implemented), None)
 
 
 def humanize(name: str) -> str:
