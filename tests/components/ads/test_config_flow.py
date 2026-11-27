@@ -20,7 +20,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 
 from . import ADS_CONFIG
-from .const import AMS_NET_ID, IP_ADDRESS, PORT, SWITCH_SUBENTRY_ID, SWITCH_VAR
+from .const import (
+    AMS_NET_ID,
+    IP_ADDRESS,
+    PORT,
+    SWITCH_COMPONENT_ID,
+    SWITCH_SUBENTRY_ID,
+    SWITCH_VAR,
+)
 
 pytestmark = pytest.mark.usefixtures("mock_setup_entry")
 
@@ -389,12 +396,26 @@ def loaded_entry(hass: HomeAssistant, mock_hub: MagicMock) -> MockConfigEntry:
 async def _async_start_switch_flow(
     hass: HomeAssistant, entry: MockConfigEntry
 ) -> dict[str, Any]:
+    """Start adding a device and pick a switch as its entity."""
     result = await hass.config_entries.subentries.async_init(
-        (entry.entry_id, "switch"), context={"source": SOURCE_USER}
+        (entry.entry_id, "device"), context={"source": SOURCE_USER}
+    )
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "user"
+    assert result["menu_options"] == ["switch"]
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"next_step_id": "switch"}
     )
     assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "user"
+    assert result["step_id"] == "switch"
     return result
+
+
+def _component(subentry: Any) -> dict[str, Any]:
+    """Return the only component of a device subentry."""
+    (component,) = subentry.data["components"].values()
+    return component
 
 
 @pytest.mark.parametrize("symbol_type", ["BOOL", "BIT", "bool"])
@@ -414,9 +435,9 @@ async def test_switch_subentry_flow(
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     (subentry,) = loaded_entry.subentries.values()
-    assert subentry.subentry_type == "switch"
+    assert subentry.subentry_type == "device"
     assert subentry.title == "Pump"
-    assert subentry.data == {"adsvar": SWITCH_VAR}
+    assert _component(subentry) == {"platform": "switch", "adsvar": SWITCH_VAR}
     assert subentry.unique_id is None
     mock_hub.get_symbol_type.assert_called_once_with(SWITCH_VAR)
 
@@ -509,7 +530,7 @@ async def test_switch_subentry_flow_unverified(
     assert result["type"] is FlowResultType.CREATE_ENTRY
     (subentry,) = loaded_entry.subentries.values()
     assert subentry.title == "Pump"
-    assert subentry.data == {"adsvar": SWITCH_VAR}
+    assert _component(subentry) == {"platform": "switch", "adsvar": SWITCH_VAR}
 
 
 async def test_switch_subentry_flow_entry_not_loaded(
@@ -565,9 +586,16 @@ async def test_switch_subentry_reconfigure(
         subentries_data=[
             ConfigSubentryDataWithId(
                 subentry_id=SWITCH_SUBENTRY_ID,
-                subentry_type="switch",
+                subentry_type="device",
                 title="Pump",
-                data={"adsvar": SWITCH_VAR},
+                data={
+                    "components": {
+                        SWITCH_COMPONENT_ID: {
+                            "platform": "switch",
+                            "adsvar": SWITCH_VAR,
+                        }
+                    }
+                },
                 unique_id=None,
             )
         ],
@@ -577,7 +605,7 @@ async def test_switch_subentry_reconfigure(
 
     result = await entry.start_subentry_reconfigure_flow(hass, SWITCH_SUBENTRY_ID)
     assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "user"
+    assert result["step_id"] == "switch"
     schema = result["data_schema"].schema
     assert {key: key.description for key in schema} == {
         "name": {"suggested_value": "Pump"},
@@ -593,6 +621,11 @@ async def test_switch_subentry_reconfigure(
     assert result["reason"] == "reconfigure_successful"
     subentry = entry.subentries[SWITCH_SUBENTRY_ID]
     assert subentry.title == "Fan"
-    assert subentry.data == {"adsvar": "GVL.bFan"}
+    # The component keeps its ID, so the entity keeps its unique ID.
+    assert subentry.data == {
+        "components": {
+            SWITCH_COMPONENT_ID: {"platform": "switch", "adsvar": "GVL.bFan"}
+        }
+    }
     mock_reload.assert_called_once_with(entry.entry_id)
     mock_hub.get_symbol_type.assert_called_once_with("GVL.bFan")

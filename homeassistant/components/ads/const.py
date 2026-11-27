@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pyads
 
+from homeassistant.const import Platform
 from homeassistant.util.hass_dict import HassKey
 
 if TYPE_CHECKING:
@@ -73,7 +74,12 @@ ADS_TYPEMAP = {
 CONF_ADS_FACTOR = "factor"
 CONF_ADS_TYPE = "adstype"
 
-SUBENTRY_TYPE_SWITCH = "switch"
+# A subentry is a device whose entities are its components, each for one
+# platform, as MQTT models them.
+SUBENTRY_TYPE_DEVICE = "device"
+CONF_COMPONENTS = "components"
+# The platforms a device's entity can be created for in the UI.
+SUBENTRY_PLATFORMS = [Platform.SWITCH]
 
 # Symbol types the PLC reports for a variable a switch can write.
 BOOL_SYMBOL_TYPES = frozenset({"BOOL", "BIT"})

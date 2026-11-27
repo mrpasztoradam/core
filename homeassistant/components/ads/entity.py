@@ -43,6 +43,10 @@ class AdsEntity(Entity):
         self._notification_handles: list[int] = []
         self._removed = False
         self._subscribe_task: asyncio.Task[None] | None = None
+        # An entity added in the UI is added without waiting for its first
+        # value. Waiting holds up the entry's setup, and an entity whose device
+        # is deleted meanwhile leaves its state behind once the add completes.
+        self._subscribe_in_background = device_info is not None
         if device_info is None:
             self._attr_unique_id = ads_var
             self._attr_name = name
@@ -59,6 +63,12 @@ class AdsEntity(Entity):
     @override
     async def async_added_to_hass(self) -> None:
         """Subscribe once the entity is added."""
+        if self._subscribe_in_background:
+            # Removing the entity drops a subscription still in flight.
+            self.hass.async_create_task(
+                self.async_run_subscribe(), f"ads subscribe {self._ads_var}"
+            )
+            return
         await self.async_run_subscribe()
 
     async def async_run_subscribe(self) -> None:
@@ -116,6 +126,21 @@ class AdsEntity(Entity):
                 await event.wait()
         except TimeoutError:
             _LOGGER.debug("Variable %s: Timeout during first update", ads_var)
+        else:
+            return
+        # The PLC sends the current value as soon as the notification is added,
+        # and the ADS library drops it if it arrives before the library has
+        # registered the handle. Later changes still arrive, so read the value
+        # once instead of staying unavailable until the variable changes.
+        if self._removed:
+            return
+        value = await self.hass.async_add_executor_job(
+            self._ads_hub.read_by_name, ads_var, plctype
+        )
+        if value is None or self._removed or self._state_dict[state_key] is not None:
+            return
+        self._state_dict[state_key] = value if factor is None else value / factor
+        self.async_write_ha_state()
 
     async def async_add_notification(
         self,

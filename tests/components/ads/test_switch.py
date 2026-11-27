@@ -15,8 +15,8 @@ from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, TargetKe
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-from . import MockAdsDevice, setup_ads_platform
-from .const import SWITCH_SUBENTRY_ID, SWITCH_VAR
+from . import MockAdsDevice, async_run_past_first_update, setup_ads_platform
+from .const import SWITCH_COMPONENT_ID, SWITCH_SUBENTRY_ID, SWITCH_VAR
 
 ADS_VAR = "GVL.pump"
 ENTITY_ID = "switch.pump"
@@ -156,6 +156,7 @@ async def test_ui_switch(
         hass, entity_registry, snapshot, mock_config_entry_with_switch.entry_id
     )
     entity = entity_registry.async_get(UI_ENTITY_ID)
+    assert entity.unique_id == f"{SWITCH_SUBENTRY_ID}_{SWITCH_COMPONENT_ID}"
     assert entity.config_subentry_id == SWITCH_SUBENTRY_ID
     device = device_registry.async_get(entity.device_id)
     assert device.identifiers == {(DOMAIN, SWITCH_SUBENTRY_ID)}
@@ -207,9 +208,16 @@ async def test_ui_switch_added_without_reload(
         hass.config_entries.async_add_subentry(
             mock_config_entry,
             ConfigSubentry(
-                subentry_type="switch",
+                subentry_type="device",
                 title="Pump",
-                data={"adsvar": SWITCH_VAR},
+                data={
+                    "components": {
+                        SWITCH_COMPONENT_ID: {
+                            "platform": "switch",
+                            "adsvar": SWITCH_VAR,
+                        }
+                    }
+                },
                 unique_id=None,
             ),
         )
@@ -297,3 +305,72 @@ async def test_ui_switch_unloaded_before_the_connection_closes(
         client.mock_calls.index(call.close())
     )
     assert hass.states.get(UI_ENTITY_ID).state == STATE_UNAVAILABLE
+
+
+async def test_ui_switch_set_up_without_waiting(
+    hass: HomeAssistant,
+    mock_config_entry_with_switch: MockConfigEntry,
+    mock_pyads_connection: MagicMock,
+    mock_ads_device: MockAdsDevice,
+) -> None:
+    """Test the entry loads before a UI switch's first value, which it reads late.
+
+    The PLC's first notification can be lost, so the switch reads the
+    variable once when no first value arrived in time.
+    """
+    mock_pyads_connection.return_value.read_by_name.return_value = True
+    mock_config_entry_with_switch.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(mock_config_entry_with_switch.entry_id)
+    assert mock_config_entry_with_switch.state is ConfigEntryState.LOADED
+    assert hass.states.get(UI_ENTITY_ID).state == STATE_UNAVAILABLE
+
+    await async_run_past_first_update(
+        hass, mock_ads_device, hass.async_block_till_done()
+    )
+
+    mock_pyads_connection.return_value.read_by_name.assert_called_once_with(
+        SWITCH_VAR, pyads.PLCTYPE_BOOL
+    )
+    assert hass.states.get(UI_ENTITY_ID).state == STATE_ON
+
+
+async def test_ui_switch_removed_before_its_first_value(
+    hass: HomeAssistant,
+    mock_config_entry_with_switch: MockConfigEntry,
+    mock_pyads_connection: MagicMock,
+    mock_ads_device: MockAdsDevice,
+) -> None:
+    """Test deleting a switch still waiting for its first value leaves no state."""
+    mock_pyads_connection.return_value.read_by_name.return_value = True
+    mock_config_entry_with_switch.add_to_hass(hass)
+    await hass.config_entries.async_setup(mock_config_entry_with_switch.entry_id)
+    assert hass.states.get(UI_ENTITY_ID) is not None
+
+    hass.config_entries.async_remove_subentry(
+        mock_config_entry_with_switch, SWITCH_SUBENTRY_ID
+    )
+    await async_run_past_first_update(
+        hass, mock_ads_device, hass.async_block_till_done()
+    )
+
+    assert hass.states.get(UI_ENTITY_ID) is None
+    # Nothing is read for a switch that is gone.
+    mock_pyads_connection.return_value.read_by_name.assert_not_called()
+
+
+async def test_yaml_switch_reads_a_lost_first_value(
+    hass: HomeAssistant,
+    mock_pyads_connection: MagicMock,
+    mock_ads_device: MockAdsDevice,
+) -> None:
+    """Test a YAML switch whose first notification is lost reads the variable."""
+    mock_pyads_connection.return_value.read_by_name.return_value = True
+
+    assert await async_run_past_first_update(
+        hass,
+        mock_ads_device,
+        setup_ads_platform(hass, mock_ads_device, SWITCH_DOMAIN, PLATFORM_CONFIG),
+    )
+
+    assert hass.states.get(ENTITY_ID).state == STATE_ON

@@ -14,7 +14,7 @@ from homeassistant.config_entries import (
     ConfigEntry,
     ConfigEntryChange,
 )
-from homeassistant.const import CONF_NAME
+from homeassistant.const import CONF_NAME, CONF_PLATFORM, Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv, device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -25,7 +25,13 @@ from homeassistant.helpers.entity_platform import (
 )
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
-from .const import CONF_ADS_VAR, DOMAIN, STATE_KEY_STATE, SUBENTRY_TYPE_SWITCH
+from .const import (
+    CONF_ADS_VAR,
+    CONF_COMPONENTS,
+    DOMAIN,
+    STATE_KEY_STATE,
+    SUBENTRY_TYPE_DEVICE,
+)
 from .entity import AdsEntity
 from .hub import AdsConfigEntry, async_wait_for_hub
 
@@ -62,7 +68,7 @@ async def async_setup_entry(
     entry: AdsConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up the switches of the entry's subentries."""
+    """Set up the switches of the devices added in the UI."""
     hub = entry.runtime_data
     hub_device = dr.async_get(hass).async_get_device_by_identifier(
         (DOMAIN, entry.entry_id), entry.entry_id
@@ -75,21 +81,27 @@ async def async_setup_entry(
         # Forget deleted subentries, so their IDs are not kept until unload.
         known.intersection_update(entry.subentries)
         for subentry_id, subentry in entry.subentries.items():
-            if subentry.subentry_type != SUBENTRY_TYPE_SWITCH or subentry_id in known:
+            if subentry.subentry_type != SUBENTRY_TYPE_DEVICE or subentry_id in known:
                 continue
             known.add(subentry_id)
-            switch = AdsSwitch(
-                hub,
-                subentry.title,
-                subentry.data[CONF_ADS_VAR],
-                unique_id=subentry_id,
-                device_info=DeviceInfo(
-                    identifiers={(DOMAIN, subentry_id)},
-                    name=subentry.title,
-                    via_device_id=hub_device.id,
-                ),
+            device_info = DeviceInfo(
+                identifiers={(DOMAIN, subentry_id)},
+                name=subentry.title,
+                via_device_id=hub_device.id,
             )
-            async_add_entities([switch], config_subentry_id=subentry_id)
+            switches = [
+                AdsSwitch(
+                    hub,
+                    subentry.title,
+                    component[CONF_ADS_VAR],
+                    unique_id=f"{subentry_id}_{component_id}",
+                    device_info=device_info,
+                )
+                for component_id, component in subentry.data[CONF_COMPONENTS].items()
+                if component[CONF_PLATFORM] == Platform.SWITCH
+            ]
+            if switches:
+                async_add_entities(switches, config_subentry_id=subentry_id)
 
     @callback
     def _async_entry_changed(

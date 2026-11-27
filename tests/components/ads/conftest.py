@@ -13,7 +13,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 
 from . import ADS_CONFIG, MockAdsDevice
-from .const import AMS_NET_ID, DEVICE_NAME, SWITCH_SUBENTRY_ID, SWITCH_VAR
+from .const import (
+    AMS_NET_ID,
+    DEVICE_NAME,
+    SWITCH_COMPONENT_ID,
+    SWITCH_SUBENTRY_ID,
+    SWITCH_VAR,
+)
 
 
 @pytest.fixture
@@ -32,9 +38,16 @@ def mock_config_entry_with_switch() -> MockConfigEntry:
         subentries_data=[
             ConfigSubentryDataWithId(
                 subentry_id=SWITCH_SUBENTRY_ID,
-                subentry_type="switch",
+                subentry_type="device",
                 title="Pump",
-                data={"adsvar": SWITCH_VAR},
+                data={
+                    "components": {
+                        SWITCH_COMPONENT_ID: {
+                            "platform": "switch",
+                            "adsvar": SWITCH_VAR,
+                        }
+                    }
+                },
                 unique_id=None,
             )
         ],
@@ -71,6 +84,8 @@ def mock_pyads_connection(mock_create_connection: MagicMock) -> Generator[MagicM
             ),
         )
         client.get_symbol.return_value.symbol_type = "BOOL"
+        # A variable the mock device has no value for cannot be read either.
+        client.read_by_name.return_value = None
         yield mock_connection
 
 

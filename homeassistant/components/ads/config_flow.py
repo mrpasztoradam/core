@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from functools import partial
 import logging
 from typing import Any, override
+from uuid import uuid4
 
 import probatio
 import pyads
@@ -17,17 +18,26 @@ from homeassistant.config_entries import (
     ConfigSubentryFlow,
     SubentryFlowResult,
 )
-from homeassistant.const import CONF_DEVICE, CONF_IP_ADDRESS, CONF_NAME, CONF_PORT
+from homeassistant.const import (
+    CONF_DEVICE,
+    CONF_IP_ADDRESS,
+    CONF_NAME,
+    CONF_PLATFORM,
+    CONF_PORT,
+    Platform,
+)
 from homeassistant.core import callback
 from homeassistant.helpers.selector import TextSelector
 
 from .const import (
     BOOL_SYMBOL_TYPES,
     CONF_ADS_VAR,
+    CONF_COMPONENTS,
     DEFAULT_PORT,
     DOMAIN,
     ELEMENTARY_SYMBOL_TYPES,
-    SUBENTRY_TYPE_SWITCH,
+    SUBENTRY_PLATFORMS,
+    SUBENTRY_TYPE_DEVICE,
 )
 from .hub import AdsConfigEntry, check_reachable
 
@@ -42,9 +52,9 @@ STEP_USER_DATA_SCHEMA = probatio.Schema(
 )
 
 
-STEP_SWITCH_DATA_SCHEMA = probatio.Schema(
+STEP_ENTITY_DATA_SCHEMA = probatio.Schema(
     {
-        # The switch is the user's own; nothing on the PLC names it.
+        # The device is the user's own; nothing on the PLC names it.
         # pylint: disable-next=home-assistant-config-flow-name-field
         probatio.Required(CONF_NAME): TextSelector(),
         probatio.Required(CONF_ADS_VAR): TextSelector(),
@@ -113,7 +123,7 @@ class AdsConfigFlow(ConfigFlow, domain=DOMAIN):
         cls, config_entry: ConfigEntry
     ) -> dict[str, type[ConfigSubentryFlow]]:
         """Return the subentries the entry supports."""
-        return {SUBENTRY_TYPE_SWITCH: AdsSwitchSubentryFlow}
+        return {SUBENTRY_TYPE_DEVICE: AdsDeviceSubentryFlow}
 
     def _route_in_use(self, data: dict[str, Any]) -> bool:
         """Return whether the loaded hub holds a route to the NetID elsewhere.
@@ -213,22 +223,57 @@ def _base_symbol_type(symbol_type: str) -> str:
     return symbol_type.partition("(")[0].strip().upper()
 
 
-class AdsSwitchSubentryFlow(ConfigSubentryFlow):
-    """Add or change a switch for a BOOL variable on the PLC."""
+class AdsDeviceSubentryFlow(ConfigSubentryFlow):
+    """Add or change a device made of entities for PLC variables.
 
-    _pending: dict[str, Any]
+    The subentry holds the entities as components, keyed by a component ID,
+    so a device can later carry several entities, such as those of a building
+    automation object.
+    """
+
+    _name: str
+    _component_id: str
+    _component: dict[str, Any]
     # Shown by the step that asks to save the variable unchecked.
     _confirm_placeholders: dict[str, str]
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
+        """Ask what kind of entity the device has."""
+        self._component_id = uuid4().hex
+        return self.async_show_menu(step_id="user", menu_options=SUBENTRY_PLATFORMS)
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Change the device's entity."""
+        subentry = self._get_reconfigure_subentry()
+        # Every device has a single entity so far.
+        self._component_id, component = next(
+            iter(subentry.data[CONF_COMPONENTS].items())
+        )
+        return await self._async_step_platform(component[CONF_PLATFORM], None)
+
+    async def async_step_switch(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
         """Ask for the switch's name and variable."""
+        return await self._async_step_platform(Platform.SWITCH, user_input)
+
+    async def _async_step_platform(
+        self, platform: Platform, user_input: dict[str, Any] | None
+    ) -> SubentryFlowResult:
+        """Ask for the name and variable of an entity of the platform."""
         errors: dict[str, str] = {}
         placeholders: dict[str, str] = {}
 
         if user_input is not None:
-            self._pending = user_input
+            self._name = user_input[CONF_NAME]
+            self._component = {
+                CONF_PLATFORM: platform,
+                CONF_ADS_VAR: user_input[CONF_ADS_VAR],
+            }
             self._confirm_placeholders = {"adsvar": user_input[CONF_ADS_VAR]}
             try:
                 unverified_step = await self._async_check_variable(
@@ -248,22 +293,20 @@ class AdsSwitchSubentryFlow(ConfigSubentryFlow):
         suggested_values = user_input
         if suggested_values is None and self.source == SOURCE_RECONFIGURE:
             subentry = self._get_reconfigure_subentry()
-            suggested_values = {CONF_NAME: subentry.title, **subentry.data}
+            component = subentry.data[CONF_COMPONENTS][self._component_id]
+            suggested_values = {
+                CONF_NAME: subentry.title,
+                CONF_ADS_VAR: component[CONF_ADS_VAR],
+            }
 
         return self.async_show_form(
-            step_id="user",
+            step_id=platform,
             data_schema=self.add_suggested_values_to_schema(
-                STEP_SWITCH_DATA_SCHEMA, suggested_values
+                STEP_ENTITY_DATA_SCHEMA, suggested_values
             ),
             errors=errors,
             description_placeholders=placeholders,
         )
-
-    async def async_step_reconfigure(
-        self, user_input: dict[str, Any] | None = None
-    ) -> SubentryFlowResult:
-        """Change the switch's name or variable."""
-        return await self.async_step_user(user_input)
 
     async def _async_check_variable(self, ads_var: str) -> str | None:
         """Check the variable is a BOOL on the PLC.
@@ -308,40 +351,39 @@ class AdsSwitchSubentryFlow(ConfigSubentryFlow):
     async def async_step_confirm_not_loaded(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Ask to save the switch while the connection is not set up."""
+        """Ask to save the entity while the connection is not set up."""
         return await self._async_step_confirm("confirm_not_loaded", user_input)
 
     async def async_step_confirm_not_found(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Ask to save a switch for a variable the PLC does not know."""
+        """Ask to save an entity for a variable the PLC does not know."""
         return await self._async_step_confirm("confirm_not_found", user_input)
 
     async def async_step_confirm_cannot_connect(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Ask to save the switch while the PLC does not answer."""
+        """Ask to save the entity while the PLC does not answer."""
         return await self._async_step_confirm("confirm_cannot_connect", user_input)
 
     async def async_step_confirm_unknown_type(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Ask to save a switch for a variable whose type is not a known BOOL."""
+        """Ask to save an entity for a variable whose type is not a known BOOL."""
         return await self._async_step_confirm("confirm_unknown_type", user_input)
 
     @callback
     def _async_finish(self) -> SubentryFlowResult:
         """Create or update the subentry."""
-        title = self._pending[CONF_NAME]
-        data = {CONF_ADS_VAR: self._pending[CONF_ADS_VAR]}
+        data = {CONF_COMPONENTS: {self._component_id: self._component}}
         if self.source == SOURCE_RECONFIGURE:
             return self.async_update_reload_and_abort(
                 self._get_entry(),
                 self._get_reconfigure_subentry(),
-                title=title,
+                title=self._name,
                 data=data,
             )
-        return self.async_create_entry(title=title, data=data)
+        return self.async_create_entry(title=self._name, data=data)
 
 
 class _WrongTypeError(Exception):
