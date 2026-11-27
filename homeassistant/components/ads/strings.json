@@ -29,6 +29,12 @@
   },
   "config_subentries": {
     "device": {
+      "abort": {
+        "objects_failed": "The objects could not be read from the PLC. See the log for details.",
+        "objects_not_loaded": "The ADS connection is not set up, so the PLC cannot be read.",
+        "objects_nothing_new": "All {found} objects of the PLC program were added before.",
+        "objects_successful": "Added {added} objects."
+      },
       "entry_type": "Device",
       "error": {
         "unknown": "[%key:common::config_flow::error::unknown%]",
@@ -54,6 +60,18 @@
           "description": "`{adsvar}` is of type `{type}`, which could not be confirmed as a `BOOL`. Save it anyway if the type is an alias of `BOOL`.",
           "title": "[%key:component::ads::config_subentries::device::step::confirm_not_loaded::title%]"
         },
+        "objects_select": {
+          "data": {
+            "areas": "Put objects in their rooms",
+            "objects": "Objects"
+          },
+          "data_description": {
+            "areas": "Create the floors and rooms as areas and put each object in its room.",
+            "objects": "Floor · room · name, from the views the object is declared in and its `ha.name` attribute."
+          },
+          "description": "The PLC program has {found} objects for Home Assistant ({interfaces}), {new} of them not added yet. Each becomes a device whose state follows the object and whose commands call its methods.",
+          "title": "Objects in the PLC program"
+        },
         "switch": {
           "data": {
             "adsvar": "PLC variable",
@@ -67,8 +85,9 @@
           "title": "Switch"
         },
         "user": {
-          "description": "Choose the kind of entity the device has.",
+          "description": "Discover the objects the PLC program defines for Home Assistant, or add a single entity.",
           "menu_options": {
+            "objects": "Discover objects",
             "switch": "Switch"
           },
           "title": "Add device"

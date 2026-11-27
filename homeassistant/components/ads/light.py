@@ -1,5 +1,7 @@
 """Support for ADS light sources."""
 
+from collections.abc import Mapping
+import struct
 from typing import Any, override
 
 import probatio
@@ -15,15 +17,19 @@ from homeassistant.components.light import (
     LightEntity,
     filter_supported_color_modes,
 )
-from homeassistant.const import CONF_NAME
+from homeassistant.const import CONF_NAME, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import (
+    AddConfigEntryEntitiesCallback,
+    AddEntitiesCallback,
+)
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
-from .const import CONF_ADS_VAR, STATE_KEY_STATE
+from .const import CONF_ADS_VAR, CONF_OBJECT, STATE_KEY_STATE
 from .entity import AdsEntity
-from .hub import AdsHub, async_wait_for_hub
+from .hub import AdsConfigEntry, AdsHub, async_wait_for_hub
+from .subentry import async_setup_subentry_entities
 
 CONF_ADS_VAR_BRIGHTNESS = "adsvar_brightness"
 CONF_ADS_VAR_COLOR_TEMP_KELVIN = "adsvar_color_temp_kelvin"
@@ -76,6 +82,34 @@ async def async_setup_platform(
     )
 
 
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: AdsConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the lights of the devices added in the UI."""
+
+    def _create(
+        hub: AdsHub, component: Mapping[str, Any], kwargs: dict[str, Any]
+    ) -> AdsEntity:
+        if CONF_OBJECT in component:
+            return AdsObjectLight(hub, component[CONF_OBJECT], **kwargs)
+        return AdsLight(
+            hub,
+            component[CONF_ADS_VAR],
+            component.get(CONF_ADS_VAR_BRIGHTNESS),
+            None,
+            None,
+            None,
+            "",
+            **kwargs,
+        )
+
+    async_setup_subentry_entities(
+        hass, entry, async_add_entities, Platform.LIGHT, _create
+    )
+
+
 class AdsLight(AdsEntity, LightEntity):
     """Representation of ADS light."""
 
@@ -88,9 +122,10 @@ class AdsLight(AdsEntity, LightEntity):
         min_color_temp_kelvin: int | None,
         max_color_temp_kelvin: int | None,
         name: str,
+        **entity_kwargs: Any,
     ) -> None:
         """Initialize AdsLight entity."""
-        super().__init__(ads_hub, name, ads_var_enable)
+        super().__init__(ads_hub, name, ads_var_enable, **entity_kwargs)
         self._state_dict[STATE_KEY_BRIGHTNESS] = None
         self._state_dict[STATE_KEY_COLOR_TEMP_KELVIN] = None
         self._ads_var_brightness = ads_var_brightness
@@ -179,3 +214,52 @@ class AdsLight(AdsEntity, LightEntity):
     def turn_off(self, **kwargs: Any) -> None:
         """Turn the light off."""
         self._ads_hub.write_by_name(self._ads_var, False, pyads.PLCTYPE_BOOL)
+
+
+class AdsObjectLight(AdsEntity, LightEntity):
+    """A light object of the PLC program (I_HA_Light).
+
+    The state is the object's IsOn and Brightness properties, which follow the
+    real light, and the commands call its TurnOn and TurnOff methods.
+    """
+
+    _attr_color_mode = ColorMode.BRIGHTNESS
+    _attr_supported_color_modes = {ColorMode.BRIGHTNESS}
+
+    def __init__(self, ads_hub: AdsHub, path: str, **entity_kwargs: Any) -> None:
+        """Initialize the light object."""
+        super().__init__(ads_hub, "", path, **entity_kwargs)
+        self._state_dict[STATE_KEY_BRIGHTNESS] = None
+
+    @override
+    async def async_subscribe(self) -> None:
+        """Follow the object's properties."""
+        await self.async_initialize_device(f"{self._ads_var}.IsOn", pyads.PLCTYPE_BOOL)
+        await self.async_initialize_device(
+            f"{self._ads_var}.Brightness", pyads.PLCTYPE_USINT, STATE_KEY_BRIGHTNESS
+        )
+
+    @property
+    @override
+    def is_on(self) -> bool | None:
+        """Return whether the light is on."""
+        return self._state_dict[STATE_KEY_STATE]
+
+    @property
+    @override
+    def brightness(self) -> int | None:
+        """Return the light's actual brightness."""
+        return self._state_dict[STATE_KEY_BRIGHTNESS]
+
+    @override
+    def turn_on(self, **kwargs: Any) -> None:
+        """Turn the light on, at a brightness if given (0 = the PLC's own)."""
+        brightness = kwargs.get(ATTR_BRIGHTNESS, 0)
+        self._ads_hub.call_method(
+            self._ads_var, "TurnOn", struct.pack("<B", brightness), return_size=1
+        )
+
+    @override
+    def turn_off(self, **kwargs: Any) -> None:
+        """Turn the light off."""
+        self._ads_hub.call_method(self._ads_var, "TurnOff", b"", return_size=1)

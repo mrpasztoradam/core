@@ -17,6 +17,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import PlatformNotReady
 
 from .const import DATA_SETUP_DONE, DOMAIN
+from .plc_objects import PlcObject, find_objects, place, read_types
 
 if TYPE_CHECKING:
     from .entity import AdsEntity
@@ -131,6 +132,69 @@ class AdsHub:
                 raise pyads.ADSError(err_code=1864)
             # Unlike most pyads calls, this raises on a closed port.
             return self._client.get_symbol(name).symbol_type
+
+    def discover_objects(self) -> list[PlcObject]:
+        """Find the objects the PLC program defines for Home Assistant."""
+        with self._lock:
+            if self._closed:
+                raise pyads.ADSError(err_code=1864)
+            types = read_types(self._client)
+            symbols = [
+                (symbol.name, symbol.symbol_type)
+                for symbol in self._client.get_all_symbols()
+            ]
+        objects = find_objects(types, symbols)
+
+        def read_description(name: str) -> str | None:
+            with self._lock:
+                try:
+                    return self._client.read_by_name(name, pyads.PLCTYPE_STRING)
+                except pyads.ADSError:
+                    return None
+
+        place(objects, read_description)
+        return objects
+
+    def call_method(
+        self, path: str, method: str, inputs: bytes, return_size: int
+    ) -> bytes:
+        """Call a method of a function block instance by ADS RPC.
+
+        The inputs are packed in declaration order; the result is the return
+        value followed by the outputs. pyads 3.4.0 has no call for this, so it
+        is a write-read on a handle to "<instance>#<method>".
+        """
+        with self._lock:
+            if self._closed:
+                raise pyads.ADSError(err_code=1864)
+            handle = self._client.get_handle(f"{path}#{method}")
+            if handle is None:
+                # pyads returns None instead of raising when the port is closed.
+                raise pyads.ADSError(err_code=1864)
+            try:
+                if inputs:
+                    raw = self._client.read_write(
+                        pyads.constants.ADSIGRP_SYM_VALBYHND,
+                        handle,
+                        ctypes.c_ubyte * return_size,
+                        inputs,
+                        ctypes.c_ubyte * len(inputs),
+                    )
+                else:
+                    # A method without inputs takes an empty write, which
+                    # Connection.read_write cannot send.
+                    raw = pyads.pyads_ex.adsSyncReadWriteReqEx2(
+                        self._client._port,  # noqa: SLF001
+                        self._client._adr,  # noqa: SLF001
+                        pyads.constants.ADSIGRP_SYM_VALBYHND,
+                        handle,
+                        ctypes.c_ubyte * return_size,
+                        None,
+                        None,
+                    )
+            finally:
+                self._client.release_handle(handle)
+        return bytes(raw)
 
     def read_device_info(self) -> tuple[str, str] | None:
         """Return the device name and version, or None if it does not answer."""

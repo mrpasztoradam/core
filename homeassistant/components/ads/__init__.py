@@ -29,7 +29,7 @@ from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SWITCH]
+PLATFORMS = [Platform.LIGHT, Platform.SWITCH]
 
 
 CONFIG_SCHEMA = probatio.Schema(

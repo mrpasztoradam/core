@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from functools import partial
 import logging
+from types import MappingProxyType
 from typing import Any, override
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ from homeassistant.config_entries import (
     ConfigEntryState,
     ConfigFlow,
     ConfigFlowResult,
+    ConfigSubentry,
     ConfigSubentryFlow,
     SubentryFlowResult,
 )
@@ -27,12 +29,23 @@ from homeassistant.const import (
     Platform,
 )
 from homeassistant.core import callback
-from homeassistant.helpers.selector import TextSelector
+from homeassistant.helpers import area_registry as ar, floor_registry as fr
+from homeassistant.helpers.selector import (
+    BooleanSelector,
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+    TextSelector,
+)
 
 from .const import (
     BOOL_SYMBOL_TYPES,
     CONF_ADS_VAR,
+    CONF_AREA,
     CONF_COMPONENTS,
+    CONF_MODEL,
+    CONF_OBJECT,
     DEFAULT_PORT,
     DOMAIN,
     ELEMENTARY_SYMBOL_TYPES,
@@ -40,6 +53,7 @@ from .const import (
     SUBENTRY_TYPE_DEVICE,
 )
 from .hub import AdsConfigEntry, check_reachable
+from .plc_objects import INTERFACES, PlcObject
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -234,6 +248,7 @@ class AdsDeviceSubentryFlow(ConfigSubentryFlow):
     _name: str
     _component_id: str
     _component: dict[str, Any]
+    _objects: list[PlcObject]
     # Shown by the step that asks to save the variable unchecked.
     _confirm_placeholders: dict[str, str]
 
@@ -242,7 +257,9 @@ class AdsDeviceSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Ask what kind of entity the device has."""
         self._component_id = uuid4().hex
-        return self.async_show_menu(step_id="user", menu_options=SUBENTRY_PLATFORMS)
+        return self.async_show_menu(
+            step_id="user", menu_options=["objects", *SUBENTRY_PLATFORMS]
+        )
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
@@ -254,6 +271,117 @@ class AdsDeviceSubentryFlow(ConfigSubentryFlow):
             iter(subentry.data[CONF_COMPONENTS].items())
         )
         return await self._async_step_platform(component[CONF_PLATFORM], None)
+
+    async def async_step_objects(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Find the objects the PLC program defines for Home Assistant."""
+        entry: AdsConfigEntry = self._get_entry()
+        if entry.state is not ConfigEntryState.LOADED:
+            return self.async_abort(reason="objects_not_loaded")
+        try:
+            self._objects = await self.hass.async_add_executor_job(
+                entry.runtime_data.discover_objects
+            )
+        except pyads.ADSError, OSError, RuntimeError:
+            _LOGGER.exception("Discovering the objects failed")
+            return self.async_abort(reason="objects_failed")
+        return await self.async_step_objects_select()
+
+    async def async_step_objects_select(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Choose which objects to add, then add them in their rooms."""
+        entry = self._get_entry()
+        known = {subentry.unique_id for subentry in entry.subentries.values()}
+        new = [obj for obj in self._objects if f"obj:{obj.path}" not in known]
+        if not new:
+            return self.async_abort(
+                reason="objects_nothing_new",
+                description_placeholders={"found": str(len(self._objects))},
+            )
+        if user_input is not None:
+            chosen = [obj for obj in new if obj.path in user_input["objects"]]
+            if user_input["areas"]:
+                self._async_create_areas(chosen)
+            for obj in chosen:
+                data: dict[str, Any] = {
+                    CONF_OBJECT: obj.path,
+                    CONF_MODEL: obj.fb_type,
+                    CONF_COMPONENTS: {
+                        uuid4().hex: {
+                            CONF_PLATFORM: INTERFACES[obj.interface],
+                            CONF_OBJECT: obj.path,
+                        }
+                    },
+                }
+                if user_input["areas"] and obj.room:
+                    data[CONF_AREA] = obj.room
+                self.hass.config_entries.async_add_subentry(
+                    entry,
+                    ConfigSubentry(
+                        subentry_type=SUBENTRY_TYPE_DEVICE,
+                        title=obj.name,
+                        data=MappingProxyType(data),
+                        unique_id=f"obj:{obj.path}",
+                    ),
+                )
+            return self.async_abort(
+                reason="objects_successful",
+                description_placeholders={"added": str(len(chosen))},
+            )
+        return self.async_show_form(
+            step_id="objects_select",
+            data_schema=probatio.Schema(
+                {
+                    probatio.Required(
+                        "objects", default=[obj.path for obj in new]
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(
+                                    value=obj.path,
+                                    label=" · ".join(
+                                        part
+                                        for part in (obj.floor, obj.room, obj.name)
+                                        if part
+                                    ),
+                                )
+                                for obj in new
+                            ],
+                            multiple=True,
+                            mode=SelectSelectorMode.LIST,
+                        )
+                    ),
+                    probatio.Required("areas", default=True): BooleanSelector(),
+                }
+            ),
+            description_placeholders={
+                "found": str(len(self._objects)),
+                "new": str(len(new)),
+                "interfaces": ", ".join(sorted({obj.interface for obj in new})),
+            },
+        )
+
+    @callback
+    def _async_create_areas(self, objects: list[PlcObject]) -> None:
+        """Create the objects' floors, and their rooms as areas on them."""
+        floor_reg = fr.async_get(self.hass)
+        area_reg = ar.async_get(self.hass)
+        for obj in objects:
+            if not obj.room:
+                continue
+            floor_id = None
+            if obj.floor:
+                floor = floor_reg.async_get_floor_by_name(
+                    obj.floor
+                ) or floor_reg.async_create(obj.floor)
+                floor_id = floor.floor_id
+            area = area_reg.async_get_area_by_name(obj.room)
+            if area is None:
+                area_reg.async_create(obj.room, floor_id=floor_id)
+            elif area.floor_id is None and floor_id is not None:
+                area_reg.async_update(area.id, floor_id=floor_id)
 
     async def async_step_switch(
         self, user_input: dict[str, Any] | None = None

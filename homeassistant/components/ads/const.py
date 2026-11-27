@@ -80,6 +80,11 @@ SUBENTRY_TYPE_DEVICE = "device"
 CONF_COMPONENTS = "components"
 # The platforms a device's entity can be created for in the UI.
 SUBENTRY_PLATFORMS = [Platform.SWITCH]
+CONF_ENTITY_CATEGORY = "entity_category"
+CONF_MODEL = "model"
+CONF_AREA = "area"
+CONF_OBJECT = "object"
+CONF_ADS_VAR_BRIGHTNESS = "adsvar_brightness"
 
 # Symbol types the PLC reports for a variable a switch can write.
 BOOL_SYMBOL_TYPES = frozenset({"BOOL", "BIT"})
