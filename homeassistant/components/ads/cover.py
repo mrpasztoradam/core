@@ -1,5 +1,6 @@
 """Support for ADS covers."""
 
+from collections.abc import Mapping
 from typing import Any, override
 
 import probatio
@@ -13,15 +14,19 @@ from homeassistant.components.cover import (
     CoverEntity,
     CoverEntityFeature,
 )
-from homeassistant.const import CONF_DEVICE_CLASS, CONF_NAME
+from homeassistant.const import CONF_DEVICE_CLASS, CONF_NAME, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import (
+    AddConfigEntryEntitiesCallback,
+    AddEntitiesCallback,
+)
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 from .const import CONF_ADS_VAR, STATE_KEY_STATE
 from .entity import AdsEntity
-from .hub import AdsHub, async_wait_for_hub
+from .hub import AdsConfigEntry, AdsHub, async_wait_for_hub
+from .subentry import async_setup_subentry_entities
 
 DEFAULT_NAME = "ADS Cover"
 
@@ -82,6 +87,35 @@ async def async_setup_platform(
     )
 
 
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: AdsConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the covers of the devices added in the UI."""
+
+    def _create(
+        hub: AdsHub, component: Mapping[str, Any], kwargs: dict[str, Any]
+    ) -> AdsCover:
+        device_class = component.get(CONF_DEVICE_CLASS)
+        return AdsCover(
+            hub,
+            component[CONF_ADS_VAR],
+            component.get(CONF_ADS_VAR_POSITION),
+            component.get(CONF_ADS_VAR_SET_POS),
+            component.get(CONF_ADS_VAR_OPEN),
+            component.get(CONF_ADS_VAR_CLOSE),
+            component.get(CONF_ADS_VAR_STOP),
+            "",
+            CoverDeviceClass(device_class) if device_class else None,
+            **kwargs,
+        )
+
+    async_setup_subentry_entities(
+        hass, entry, async_add_entities, Platform.COVER, _create
+    )
+
+
 class AdsCover(AdsEntity, CoverEntity):
     """Representation of ADS cover."""
 
@@ -96,9 +130,10 @@ class AdsCover(AdsEntity, CoverEntity):
         ads_var_stop: str | None,
         name: str,
         device_class: CoverDeviceClass | None,
+        **entity_kwargs: Any,
     ) -> None:
         """Initialize AdsCover entity."""
-        super().__init__(ads_hub, name, ads_var_is_closed)
+        super().__init__(ads_hub, name, ads_var_is_closed, **entity_kwargs)
         if self._attr_unique_id is None:
             if ads_var_position is not None:
                 self._attr_unique_id = ads_var_position

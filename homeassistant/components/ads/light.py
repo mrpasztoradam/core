@@ -1,5 +1,6 @@
 """Support for ADS light sources."""
 
+from collections.abc import Mapping
 from typing import Any, override
 
 import probatio
@@ -15,15 +16,19 @@ from homeassistant.components.light import (
     LightEntity,
     filter_supported_color_modes,
 )
-from homeassistant.const import CONF_NAME
+from homeassistant.const import CONF_NAME, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import (
+    AddConfigEntryEntitiesCallback,
+    AddEntitiesCallback,
+)
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 from .const import CONF_ADS_VAR, STATE_KEY_STATE
 from .entity import AdsEntity
-from .hub import AdsHub, async_wait_for_hub
+from .hub import AdsConfigEntry, AdsHub, async_wait_for_hub
+from .subentry import async_setup_subentry_entities
 
 CONF_ADS_VAR_BRIGHTNESS = "adsvar_brightness"
 CONF_ADS_VAR_COLOR_TEMP_KELVIN = "adsvar_color_temp_kelvin"
@@ -76,6 +81,32 @@ async def async_setup_platform(
     )
 
 
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: AdsConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the lights of the devices added in the UI."""
+
+    def _create(
+        hub: AdsHub, component: Mapping[str, Any], kwargs: dict[str, Any]
+    ) -> AdsLight:
+        return AdsLight(
+            hub,
+            component[CONF_ADS_VAR],
+            component.get(CONF_ADS_VAR_BRIGHTNESS),
+            None,
+            None,
+            None,
+            "",
+            **kwargs,
+        )
+
+    async_setup_subentry_entities(
+        hass, entry, async_add_entities, Platform.LIGHT, _create
+    )
+
+
 class AdsLight(AdsEntity, LightEntity):
     """Representation of ADS light."""
 
@@ -88,9 +119,10 @@ class AdsLight(AdsEntity, LightEntity):
         min_color_temp_kelvin: int | None,
         max_color_temp_kelvin: int | None,
         name: str,
+        **entity_kwargs: Any,
     ) -> None:
         """Initialize AdsLight entity."""
-        super().__init__(ads_hub, name, ads_var_enable)
+        super().__init__(ads_hub, name, ads_var_enable, **entity_kwargs)
         self._state_dict[STATE_KEY_BRIGHTNESS] = None
         self._state_dict[STATE_KEY_COLOR_TEMP_KELVIN] = None
         self._ads_var_brightness = ads_var_brightness

@@ -29,8 +29,15 @@
   },
   "config_subentries": {
     "device": {
+      "abort": {
+        "gvl_not_loaded": "The ADS connection is not set up, so the PLC cannot be read.",
+        "gvl_nothing_new": "All devices of {gvl} were added before.",
+        "gvl_read_failed": "The symbols could not be read from the PLC. See the log for details.",
+        "gvl_successful": "Added {added} devices from {gvl}."
+      },
       "entry_type": "Device",
       "error": {
+        "gvl_empty": "No variables of this GVL can be turned into entities.",
         "unknown": "[%key:common::config_flow::error::unknown%]",
         "wrong_type": "The variable is of type `{type}`. A switch needs a `BOOL` variable."
       },
@@ -54,6 +61,28 @@
           "description": "`{adsvar}` is of type `{type}`, which could not be confirmed as a `BOOL`. Save it anyway if the type is an alias of `BOOL`.",
           "title": "[%key:component::ads::config_subentries::device::step::confirm_not_loaded::title%]"
         },
+        "gvl": {
+          "data": {
+            "gvl": "GVL"
+          },
+          "data_description": {
+            "gvl": "The number of variables is in brackets. You can also type a name."
+          },
+          "description": "Choose a global variable list (GVL) of the PLC program. Its struct variables become devices, and their members entities, typed by their comments: `command:` members are written by Home Assistant, `state:` members are read only, and a unit in brackets such as `[°C]` sets the unit. Read further GVLs one by one by adding a device again.",
+          "title": "Read a GVL"
+        },
+        "gvl_select": {
+          "data": {
+            "areas": "Put devices in areas",
+            "devices": "Devices"
+          },
+          "data_description": {
+            "areas": "Put each struct variable's devices in an area named after it, such as Living.",
+            "devices": "Each struct variable is a device; structs in it marked as a light or a cover are devices of their own."
+          },
+          "description": "{gvl} describes {devices} new devices with {entities} entities. {known} were added before and are not listed.",
+          "title": "Devices in {gvl}"
+        },
         "switch": {
           "data": {
             "adsvar": "PLC variable",
@@ -67,8 +96,9 @@
           "title": "Switch"
         },
         "user": {
-          "description": "Choose the kind of entity the device has.",
+          "description": "Choose what to add: a single entity, or the devices described by a GVL.",
           "menu_options": {
+            "gvl": "Read a GVL",
             "switch": "Switch"
           },
           "title": "Add device"

@@ -8,7 +8,7 @@ import logging
 import socket
 import struct
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pyads
 
@@ -17,6 +17,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import PlatformNotReady
 
 from .const import DATA_SETUP_DONE, DOMAIN
+from .gvl import read_layout
 
 if TYPE_CHECKING:
     from .entity import AdsEntity
@@ -131,6 +132,15 @@ class AdsHub:
                 raise pyads.ADSError(err_code=1864)
             # Unlike most pyads calls, this raises on a closed port.
             return self._client.get_symbol(name).symbol_type
+
+    def read_gvl_layout(
+        self,
+    ) -> tuple[dict[str, dict[str, Any]], list[tuple[str, str, str]]]:
+        """Read the data type table and the symbols, to read GVLs from."""
+        with self._lock:
+            if self._closed:
+                raise pyads.ADSError(err_code=1864)
+            return read_layout(self._client)
 
     def read_device_info(self) -> tuple[str, str] | None:
         """Return the device name and version, or None if it does not answer."""

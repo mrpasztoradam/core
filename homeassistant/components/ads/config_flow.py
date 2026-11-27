@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from functools import partial
 import logging
+from types import MappingProxyType
 from typing import Any, override
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ from homeassistant.config_entries import (
     ConfigEntryState,
     ConfigFlow,
     ConfigFlowResult,
+    ConfigSubentry,
     ConfigSubentryFlow,
     SubentryFlowResult,
 )
@@ -27,7 +29,14 @@ from homeassistant.const import (
     Platform,
 )
 from homeassistant.core import callback
-from homeassistant.helpers.selector import TextSelector
+from homeassistant.helpers.selector import (
+    BooleanSelector,
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+    TextSelector,
+)
 
 from .const import (
     BOOL_SYMBOL_TYPES,
@@ -39,6 +48,7 @@ from .const import (
     SUBENTRY_PLATFORMS,
     SUBENTRY_TYPE_DEVICE,
 )
+from .gvl import GvlDevice, device_data, list_gvls, plan_gvl
 from .hub import AdsConfigEntry, check_reachable
 
 _LOGGER = logging.getLogger(__name__)
@@ -234,6 +244,9 @@ class AdsDeviceSubentryFlow(ConfigSubentryFlow):
     _name: str
     _component_id: str
     _component: dict[str, Any]
+    _layout: tuple[dict[str, dict[str, Any]], list[tuple[str, str, str]]] | None = None
+    _gvl: str
+    _gvl_devices: list[GvlDevice]
     # Shown by the step that asks to save the variable unchecked.
     _confirm_placeholders: dict[str, str]
 
@@ -242,7 +255,9 @@ class AdsDeviceSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Ask what kind of entity the device has."""
         self._component_id = uuid4().hex
-        return self.async_show_menu(step_id="user", menu_options=SUBENTRY_PLATFORMS)
+        return self.async_show_menu(
+            step_id="user", menu_options=[*SUBENTRY_PLATFORMS, "gvl"]
+        )
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
@@ -254,6 +269,116 @@ class AdsDeviceSubentryFlow(ConfigSubentryFlow):
             iter(subentry.data[CONF_COMPONENTS].items())
         )
         return await self._async_step_platform(component[CONF_PLATFORM], None)
+
+    async def async_step_gvl(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Choose a GVL to read devices from."""
+        entry: AdsConfigEntry = self._get_entry()
+        if entry.state is not ConfigEntryState.LOADED:
+            return self.async_abort(reason="gvl_not_loaded")
+        if self._layout is None:
+            try:
+                self._layout = await self.hass.async_add_executor_job(
+                    entry.runtime_data.read_gvl_layout
+                )
+            except pyads.ADSError, OSError, RuntimeError:
+                _LOGGER.exception("Reading the symbols failed")
+                return self.async_abort(reason="gvl_read_failed")
+        types, symbols = self._layout
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            self._gvl = user_input["gvl"]
+            self._gvl_devices = plan_gvl(self._gvl, types, symbols)
+            if self._gvl_devices:
+                return await self.async_step_gvl_select()
+            errors["gvl"] = "gvl_empty"
+        gvls = list_gvls(symbols)
+        return self.async_show_form(
+            step_id="gvl",
+            data_schema=probatio.Schema(
+                {
+                    probatio.Required(
+                        "gvl", default="HA" if "HA" in gvls else probatio.UNDEFINED
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=gvl, label=f"{gvl} ({count})")
+                                for gvl, count in gvls.items()
+                            ],
+                            custom_value=True,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    )
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_gvl_select(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Choose which of the GVL's devices to add."""
+        entry = self._get_entry()
+        known = {subentry.unique_id for subentry in entry.subentries.values()}
+        new = [d for d in self._gvl_devices if f"gvl:{d.key}" not in known]
+        if user_input is not None and "devices" in user_input:
+            chosen = set(user_input["devices"])
+            added = 0
+            for device in new:
+                if device.key not in chosen:
+                    continue
+                self.hass.config_entries.async_add_subentry(
+                    entry,
+                    ConfigSubentry(
+                        subentry_type=SUBENTRY_TYPE_DEVICE,
+                        title=device.title,
+                        data=MappingProxyType(device_data(device, user_input["areas"])),
+                        unique_id=f"gvl:{device.key}",
+                    ),
+                )
+                added += 1
+            return self.async_abort(
+                reason="gvl_successful",
+                description_placeholders={"added": str(added), "gvl": self._gvl},
+            )
+        if not new:
+            return self.async_abort(
+                reason="gvl_nothing_new", description_placeholders={"gvl": self._gvl}
+            )
+        return self.async_show_form(
+            step_id="gvl_select",
+            data_schema=probatio.Schema(
+                {
+                    probatio.Required(
+                        "devices", default=[d.key for d in new]
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(
+                                    value=d.key,
+                                    label=(
+                                        f"{d.title}"
+                                        + (f" · {d.area}" if d.area else "")
+                                        + f" ({len(d.components)})"
+                                    ),
+                                )
+                                for d in new
+                            ],
+                            multiple=True,
+                            mode=SelectSelectorMode.LIST,
+                        )
+                    ),
+                    probatio.Required("areas", default=True): BooleanSelector(),
+                }
+            ),
+            description_placeholders={
+                "gvl": self._gvl,
+                "devices": str(len(new)),
+                "entities": str(sum(len(d.components) for d in new)),
+                "known": str(len(self._gvl_devices) - len(new)),
+            },
+        )
 
     async def async_step_switch(
         self, user_input: dict[str, Any] | None = None

@@ -6,6 +6,7 @@ from collections.abc import Callable
 import logging
 from typing import Any, override
 
+from homeassistant.const import EntityCategory
 from homeassistant.core import callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity
@@ -29,6 +30,8 @@ class AdsEntity(Entity):
         *,
         unique_id: str | None = None,
         device_info: DeviceInfo | None = None,
+        entity_name: str | None = None,
+        entity_category: EntityCategory | None = None,
     ) -> None:
         """Initialize the entity.
 
@@ -53,8 +56,10 @@ class AdsEntity(Entity):
         else:
             self._attr_unique_id = unique_id
             self._attr_has_entity_name = True
-            self._attr_name = None
+            # None names the entity after its device.
+            self._attr_name = entity_name
             self._attr_device_info = device_info
+            self._attr_entity_category = entity_category
         ads_hub.register_device(self)
         # Also runs when the entity platform refuses to add this entity, so a
         # rejected one is not left behind on the hub.
