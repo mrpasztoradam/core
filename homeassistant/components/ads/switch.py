@@ -9,17 +9,30 @@ from homeassistant.components.switch import (
     PLATFORM_SCHEMA as SWITCH_PLATFORM_SCHEMA,
     SwitchEntity,
 )
+from homeassistant.config_entries import (
+    SIGNAL_CONFIG_ENTRY_CHANGED,
+    ConfigEntry,
+    ConfigEntryChange,
+)
 from homeassistant.const import CONF_NAME
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity_platform import (
+    AddConfigEntryEntitiesCallback,
+    AddEntitiesCallback,
+)
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
-from .const import CONF_ADS_VAR, STATE_KEY_STATE
+from .const import CONF_ADS_VAR, DOMAIN, STATE_KEY_STATE, SUBENTRY_TYPE_SWITCH
 from .entity import AdsEntity
-from .hub import async_wait_for_hub
+from .hub import AdsConfigEntry, async_wait_for_hub
 
 DEFAULT_NAME = "ADS Switch"
+
+# Push based, and the hub serialises the writes.
+PARALLEL_UPDATES = 0
 
 PLATFORM_SCHEMA = SWITCH_PLATFORM_SCHEMA.extend(
     {
@@ -42,6 +55,56 @@ async def async_setup_platform(
     ads_var: str = config[CONF_ADS_VAR]
 
     async_add_entities([AdsSwitch(ads_hub, name, ads_var)])
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: AdsConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the switches of the entry's subentries."""
+    hub = entry.runtime_data
+    hub_device = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, entry.entry_id), entry.entry_id
+    )
+    assert hub_device is not None
+    known: set[str] = set()
+
+    @callback
+    def _async_add_new_switches() -> None:
+        # Forget deleted subentries, so their IDs are not kept until unload.
+        known.intersection_update(entry.subentries)
+        for subentry_id, subentry in entry.subentries.items():
+            if subentry.subentry_type != SUBENTRY_TYPE_SWITCH or subentry_id in known:
+                continue
+            known.add(subentry_id)
+            switch = AdsSwitch(
+                hub,
+                subentry.title,
+                subentry.data[CONF_ADS_VAR],
+                unique_id=subentry_id,
+                device_info=DeviceInfo(
+                    identifiers={(DOMAIN, subentry_id)},
+                    name=subentry.title,
+                    via_device_id=hub_device.id,
+                ),
+            )
+            async_add_entities([switch], config_subentry_id=subentry_id)
+
+    @callback
+    def _async_entry_changed(
+        change: ConfigEntryChange, changed_entry: ConfigEntry
+    ) -> None:
+        # Adding a subentry does not reload the entry.
+        if change is ConfigEntryChange.UPDATED and changed_entry is entry:
+            _async_add_new_switches()
+
+    _async_add_new_switches()
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass, SIGNAL_CONFIG_ENTRY_CHANGED, _async_entry_changed
+        )
+    )
 
 
 class AdsSwitch(AdsEntity, SwitchEntity):

@@ -24,6 +24,48 @@
       }
     }
   },
+  "config_subentries": {
+    "switch": {
+      "entry_type": "Switch",
+      "error": {
+        "unknown": "[%key:common::config_flow::error::unknown%]",
+        "wrong_type": "The variable is of type `{type}`. A switch needs a `BOOL` variable."
+      },
+      "initiate_flow": {
+        "user": "Add switch"
+      },
+      "step": {
+        "confirm_cannot_connect": {
+          "description": "`{adsvar}` could not be checked, because the PLC did not answer: {error}\n\nSaving it anyway adds a switch that stays unavailable until the variable exists and the ADS integration is reloaded.",
+          "title": "[%key:component::ads::config_subentries::switch::step::confirm_not_loaded::title%]"
+        },
+        "confirm_not_found": {
+          "description": "The PLC does not know `{adsvar}`. Saving it anyway adds a switch that stays unavailable until the variable exists and the ADS integration is reloaded.",
+          "title": "[%key:component::ads::config_subentries::switch::step::confirm_not_loaded::title%]"
+        },
+        "confirm_not_loaded": {
+          "description": "`{adsvar}` could not be checked, because the ADS connection is not set up. Saving it anyway adds a switch that becomes available once the connection is set up, if the PLC has the variable.",
+          "title": "Save the switch without checking it?"
+        },
+        "confirm_unknown_type": {
+          "description": "`{adsvar}` is of type `{type}`, which could not be confirmed as a `BOOL`. Save the switch anyway if the type is an alias of `BOOL`.",
+          "title": "[%key:component::ads::config_subentries::switch::step::confirm_not_loaded::title%]"
+        },
+        "user": {
+          "data": {
+            "adsvar": "PLC variable",
+            "name": "[%key:common::config_flow::data::name%]"
+          },
+          "data_description": {
+            "adsvar": "The full name of the variable, for example `GVL.bPump`.",
+            "name": "The name of the switch and its device."
+          },
+          "description": "Add a switch for a `BOOL` variable on the PLC.",
+          "title": "Switch"
+        }
+      }
+    }
+  },
   "exceptions": {
     "cannot_connect": {
       "message": "Could not connect to the ADS device: {error}"

@@ -24,12 +24,16 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er, issue_registry as ir
+from homeassistant.helpers import (
+    device_registry as dr,
+    entity_registry as er,
+    issue_registry as ir,
+)
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
 from . import ADS_CONFIG, MockAdsDevice, get_hub, setup_ads_platform
-from .const import AMS_NET_ID, IP_ADDRESS, PORT
+from .const import AMS_NET_ID, DEVICE_NAME, DEVICE_VERSION, IP_ADDRESS, PORT
 
 SWITCH_VAR = "GVL.pump"
 SWITCH_ID = "switch.pump"
@@ -339,6 +343,38 @@ async def test_setup_and_unload(
 
 
 @pytest.mark.parametrize(
+    ("device_info", "name", "sw_version"),
+    [
+        pytest.param(None, AMS_NET_ID, None, id="unanswered"),
+        pytest.param(..., DEVICE_NAME, DEVICE_VERSION, id="answered"),
+    ],
+)
+async def test_hub_device(
+    hass: HomeAssistant,
+    device_registry: dr.DeviceRegistry,
+    mock_config_entry: MockConfigEntry,
+    mock_pyads_connection: MagicMock,
+    device_info: Any,
+    name: str,
+    sw_version: str | None,
+) -> None:
+    """Test the entry registers the PLC as a device, named by the PLC if it answers."""
+    if device_info is not ...:
+        mock_pyads_connection.return_value.read_device_info.return_value = device_info
+    mock_config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    device = device_registry.async_get_device_by_identifier(
+        (DOMAIN, mock_config_entry.entry_id), mock_config_entry.entry_id
+    )
+    assert device is not None
+    assert device.name == name
+    assert device.manufacturer == "Beckhoff"
+    assert device.sw_version == sw_version
+
+
+@pytest.mark.parametrize(
     ("configure_mock", "opened"),
     [
         pytest.param(
@@ -643,8 +679,10 @@ async def test_no_subscription_after_shutdown(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Test entities set up once the connection is shut down do not subscribe."""
-    assert await async_setup_component(hass, DOMAIN, {DOMAIN: ADS_CONFIG})
-    await hass.async_block_till_done()
+    # Without UI platforms, so the switch component loads with the YAML below.
+    with patch("homeassistant.components.ads.PLATFORMS", []):
+        assert await async_setup_component(hass, DOMAIN, {DOMAIN: ADS_CONFIG})
+        await hass.async_block_till_done()
     hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
     await hass.async_block_till_done()
 

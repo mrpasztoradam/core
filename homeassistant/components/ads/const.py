@@ -72,3 +72,23 @@ ADS_TYPEMAP = {
 
 CONF_ADS_FACTOR = "factor"
 CONF_ADS_TYPE = "adstype"
+
+SUBENTRY_TYPE_SWITCH = "switch"
+
+# Symbol types the PLC reports for a variable a switch can write.
+BOOL_SYMBOL_TYPES = frozenset({"BOOL", "BIT"})
+# Elementary IEC 61131-3 types the PLC reports. A variable of one of these is
+# known not to be a BOOL; anything else, such as an alias or a structure, may
+# still be one.
+ELEMENTARY_SYMBOL_TYPES = frozenset(
+    {ads_type.upper() for ads_type in AdsType}
+    | {
+        "DATE_AND_TIME",
+        "LINT",
+        "LTIME",
+        "LWORD",
+        "TIME_OF_DAY",
+        "ULINT",
+        "WSTRING",
+    }
+)

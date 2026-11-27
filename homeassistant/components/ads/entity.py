@@ -7,6 +7,7 @@ import logging
 from typing import Any, override
 
 from homeassistant.core import callback
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity
 
 from .const import STATE_KEY_STATE
@@ -20,8 +21,21 @@ class AdsEntity(Entity):
 
     _attr_should_poll = False
 
-    def __init__(self, ads_hub: AdsHub, name: str, ads_var: str) -> None:
-        """Initialize ADS binary sensor."""
+    def __init__(
+        self,
+        ads_hub: AdsHub,
+        name: str,
+        ads_var: str,
+        *,
+        unique_id: str | None = None,
+        device_info: DeviceInfo | None = None,
+    ) -> None:
+        """Initialize the entity.
+
+        A YAML entity is named by its config and identified by its variable. An
+        entity of a subentry passes the subentry's device and ID instead, and
+        takes the device's name.
+        """
         self._state_dict: dict[str, Any] = {}
         self._state_dict[STATE_KEY_STATE] = None
         self._ads_hub = ads_hub
@@ -29,8 +43,14 @@ class AdsEntity(Entity):
         self._notification_handles: list[int] = []
         self._removed = False
         self._subscribe_task: asyncio.Task[None] | None = None
-        self._attr_unique_id = ads_var
-        self._attr_name = name
+        if device_info is None:
+            self._attr_unique_id = ads_var
+            self._attr_name = name
+        else:
+            self._attr_unique_id = unique_id
+            self._attr_has_entity_name = True
+            self._attr_name = None
+            self._attr_device_info = device_info
         ads_hub.register_device(self)
         # Also runs when the entity platform refuses to add this entity, so a
         # rejected one is not left behind on the hub.

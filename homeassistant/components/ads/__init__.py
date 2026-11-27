@@ -13,11 +13,12 @@ from homeassistant.const import (
     CONF_IP_ADDRESS,
     CONF_PORT,
     EVENT_HOMEASSISTANT_STOP,
+    Platform,
 )
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import ConfigEntryNotReady
-from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import config_validation as cv, device_registry as dr
 from homeassistant.helpers.issue_registry import IssueSeverity, async_create_issue
 from homeassistant.helpers.typing import ConfigType
 
@@ -27,6 +28,8 @@ from .hub import AdsConfigEntry, AdsHub, connect
 from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
+
+PLATFORMS = [Platform.SWITCH]
 
 
 CONFIG_SCHEMA = probatio.Schema(
@@ -122,6 +125,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AdsConfigEntry) -> None:
 
         entry.runtime_data = hub
         _async_take_over_entities(hass, entry, hub)
+        await _async_register_hub_device(hass, entry, hub)
 
         async def _async_shutdown(event: Event) -> None:
             await hass.async_add_executor_job(hub.shutdown)
@@ -129,8 +133,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: AdsConfigEntry) -> None:
         entry.async_on_unload(
             hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, _async_shutdown)
         )
+        # Inside the try: a YAML platform woken by the setup being done
+        # expects the entry to be loaded by then.
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     finally:
         hass.data[DATA_SETUP_DONE].set()
+
+
+async def _async_register_hub_device(
+    hass: HomeAssistant, entry: AdsConfigEntry, hub: AdsHub
+) -> None:
+    """Register the PLC as the device the subentries' devices are connected via."""
+    info = await hass.async_add_executor_job(hub.read_device_info)
+    dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, entry.entry_id)},
+        manufacturer="Beckhoff",
+        name=info[0] if info else entry.title,
+        sw_version=info[1] if info else None,
+    )
 
 
 @callback
@@ -166,6 +187,8 @@ def _async_take_over_entities(
 
 async def async_unload_entry(hass: HomeAssistant, entry: AdsConfigEntry) -> None:
     """Unload an ADS config entry."""
+    # The UI entities delete their notifications while the connection is open.
+    await hass.config_entries.async_unload_platforms_or_raise(entry, PLATFORMS)
     hub = entry.runtime_data
     # Entry tasks are only cancelled once this returns, so the resubscribe task
     # has to be stopped here or it would add notifications back during shutdown.
