@@ -120,6 +120,34 @@ class AdsHub:
             raise pyads.ADSError(err_code=1864)
         return state
 
+    def get_symbol_type(self, name: str) -> str:
+        """Return the type the device reports for a variable.
+
+        Raises pyads.ADSError when the device does not know the variable (1808)
+        or the hub is shut down (1864).
+        """
+        with self._lock:
+            if self._closed:
+                raise pyads.ADSError(err_code=1864)
+            # Unlike most pyads calls, this raises on a closed port.
+            return self._client.get_symbol(name).symbol_type
+
+    def read_device_info(self) -> tuple[str, str] | None:
+        """Return the device name and version, or None if it does not answer."""
+        with self._lock:
+            if self._closed:
+                return None
+            try:
+                info = self._client.read_device_info()
+            except pyads.ADSError as err:
+                _LOGGER.debug("Error reading the device info: %s", err)
+                return None
+        if info is None:
+            # pyads returns None instead of raising when the port is closed.
+            return None
+        name, version = info
+        return name, f"{version.version}.{version.revision}.{version.build}"
+
     def write_by_name(self, name, value, plc_datatype):
         """Write a value to the device."""
 

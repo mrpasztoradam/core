@@ -3,21 +3,42 @@
 from collections.abc import Generator
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pyads
 import pytest
 from pytest_homeassistant.common import MockConfigEntry
 
 from homeassistant.components.ads.const import DOMAIN
+from homeassistant.config_entries import ConfigSubentryDataWithId
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 
 from . import ADS_CONFIG, MockAdsDevice
-from .const import AMS_NET_ID
+from .const import AMS_NET_ID, DEVICE_NAME, SWITCH_SUBENTRY_ID, SWITCH_VAR
 
 
 @pytest.fixture
 def mock_config_entry() -> MockConfigEntry:
     """Return the config entry of an ADS connection."""
     return MockConfigEntry(domain=DOMAIN, title=AMS_NET_ID, data=ADS_CONFIG)
+
+
+@pytest.fixture
+def mock_config_entry_with_switch() -> MockConfigEntry:
+    """Return the config entry of an ADS connection with a switch subentry."""
+    return MockConfigEntry(
+        domain=DOMAIN,
+        title=AMS_NET_ID,
+        data=ADS_CONFIG,
+        subentries_data=[
+            ConfigSubentryDataWithId(
+                subentry_id=SWITCH_SUBENTRY_ID,
+                subentry_type="switch",
+                title="Pump",
+                data={"adsvar": SWITCH_VAR},
+                unique_id=None,
+            )
+        ],
+    )
 
 
 @pytest.fixture
@@ -42,6 +63,14 @@ def mock_create_connection() -> Generator[MagicMock]:
 def mock_pyads_connection(mock_create_connection: MagicMock) -> Generator[MagicMock]:
     """Mock the pyads Connection class."""
     with patch("pyads.Connection", autospec=True) as mock_connection:
+        client = mock_connection.return_value
+        client.read_device_info.return_value = (
+            DEVICE_NAME,
+            pyads.structs.AdsVersion(
+                pyads.structs.SAdsVersion(version=3, revision=1, build=4026)
+            ),
+        )
+        client.get_symbol.return_value.symbol_type = "BOOL"
         yield mock_connection
 
 
